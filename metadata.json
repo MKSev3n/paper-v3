@@ -1,0 +1,6 @@
+{
+  "name": "Paper — Light Novel Reader",
+  "description": "A calm, mobile-first light novel reader inspired by Light Reader, featuring LNCrawl integration, customizable reader themes, offline libraries, and reading progress tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

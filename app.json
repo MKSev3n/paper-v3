@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Paper",
+    "slug": "paper",
+    "version": "2.10.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0D0F14"
+    },
+    "scheme": "paper",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.mksev3n.paper"
+    },
+    "android": {
+      "package": "com.mksev3n.paper",
+      "adaptiveIcon": {
+        "backgroundColor": "#0D0F14",
+        "foregroundImage": "./assets/android-icon-foreground.png"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      "expo-file-system",
+      "expo-secure-store"
+    ]
+  }
+}

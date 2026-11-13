@@ -1,11 +1,28 @@
-<div align="center">
+# Paper - Expo Router TypeScript reader
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Complete Expo Router project (SDK 58). Files preserved from the original archive:
+library screen (app/index.tsx), reader screen (app/reader/[id].tsx),
+sample novels (data/novels.ts), settings/scroll storage (utils/storage.ts).
 
-  <h1>Built with AI Studio</h2>
+## Run on your Android phone (no PC)
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+1. Install the free **Expo Go** app from the Play Store.
+2. On Replit/Codespaces: unzip this zip, then run `npm install` then `npx expo start`.
+3. Scan the QR code with Expo Go. Your phone and the workspace must be on the
+   same network (or use `npx expo start --tunnel` for a public link).
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## Notes
 
-</div>
+- Entry is `expo-router/entry` (package.json "main"). babel.config.js uses
+  `babel-preset-expo` (installed as devDependency) for expo-router transforms.
+- app.json: scheme `paper`, android package `com.paper.reader`, dark UI.
+- Verify with `npm run typecheck` and `npx expo export --platform android`.
+- To export a standalone APK later, use EAS Build: `npx eas build --platform android`.
+
+## Backend plan
+
+You planned to use an **Incrawl** backend as the live API for Paper. This build
+does not call any Incrawl endpoints yet (no docs/credentials provided). Once you
+have the base URL, auth approach and endpoint docs, add them in `lib/api.ts` and
+swap `data/novels.ts` for fetched data; the reader screens already accept the
+same Novel shape.

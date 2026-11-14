@@ -20,6 +20,9 @@ type NovelRow = {
   status: string | null;
   total_chapters: number | null;
   is_downloaded: number | null;
+  provider: string | null;
+  path: string | null;
+  source_domain: string | null;
   updated_at: number | null;
   downloaded_count?: number;
 };
@@ -31,6 +34,8 @@ type ChapterRow = {
   title: string;
   content: string | null;
   is_downloaded: number;
+  provider: string | null;
+  path: string | null;
   words_count: number | null;
   release_date: string | null;
 };
@@ -66,7 +71,10 @@ async function writeWebMap<T>(key: string, map: Record<string, T>): Promise<void
 
 export async function getAllChaptersForWeb(): Promise<Chapter[]> {
   const map = await readWebMap<Chapter>(WEB_KEYS.CHAPTERS);
-  return Object.values(map);
+  return Object.values(map).map((ch) => ({
+    ...ch,
+    provider: ch.provider || 'lncrawl',
+  }));
 }
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -91,6 +99,19 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   return dbPromise;
 }
 
+async function ensureColumn(
+  db: SQLite.SQLiteDatabase,
+  table: string,
+  column: string,
+  definition: string
+): Promise<void> {
+  const cols = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);
+  const exists = cols.some((c) => c.name === column);
+  if (!exists) {
+    await db.execAsync(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
 async function initSchema(db: SQLite.SQLiteDatabase): Promise<void> {
   await db.execAsync(`
     PRAGMA journal_mode = WAL;
@@ -106,6 +127,9 @@ async function initSchema(db: SQLite.SQLiteDatabase): Promise<void> {
       status TEXT,
       total_chapters INTEGER DEFAULT 0,
       is_downloaded INTEGER DEFAULT 0,
+      provider TEXT DEFAULT 'lncrawl',
+      path TEXT,
+      source_domain TEXT,
       updated_at INTEGER
     );
 
@@ -116,6 +140,8 @@ async function initSchema(db: SQLite.SQLiteDatabase): Promise<void> {
       title TEXT NOT NULL,
       content TEXT,
       is_downloaded INTEGER DEFAULT 0,
+      provider TEXT DEFAULT 'lncrawl',
+      path TEXT,
       words_count INTEGER,
       release_date TEXT,
       FOREIGN KEY (novel_id) REFERENCES novels (id) ON DELETE CASCADE
@@ -134,6 +160,38 @@ async function initSchema(db: SQLite.SQLiteDatabase): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_chapters_novel_id ON chapters (novel_id);
     CREATE INDEX IF NOT EXISTS idx_chapters_serial ON chapters (novel_id, serial);
   `);
+
+  // Safe migrations for pre-existing databases (preserves all existing rows as provider 'lncrawl')
+  await ensureColumn(db, 'novels', 'provider', `TEXT DEFAULT 'lncrawl'`);
+  await ensureColumn(db, 'novels', 'path', 'TEXT');
+  await ensureColumn(db, 'novels', 'source_domain', 'TEXT');
+  await ensureColumn(db, 'chapters', 'provider', `TEXT DEFAULT 'lncrawl'`);
+  await ensureColumn(db, 'chapters', 'path', 'TEXT');
+
+  await db.execAsync(`
+    UPDATE novels SET provider = 'lncrawl' WHERE provider IS NULL;
+    UPDATE chapters SET provider = 'lncrawl' WHERE provider IS NULL;
+  `);
+}
+
+function mapNovelRow(row: NovelRow, forceDownloaded?: boolean): Novel {
+  return {
+    id: row.id,
+    title: row.title,
+    author: row.author || 'Unknown',
+    synopsis: row.synopsis || '',
+    coverUrl: row.cover_url || '',
+    localCoverPath: row.local_cover_path,
+    genres: JSON.parse(row.genres || '[]'),
+    status: (row.status as any) || 'Ongoing',
+    totalChapters: row.total_chapters || 0,
+    downloadedChaptersCount: row.downloaded_count || 0,
+    isDownloaded: forceDownloaded ? true : row.is_downloaded === 1,
+    provider: row.provider || 'lncrawl',
+    path: row.path || undefined,
+    sourceDomain: row.source_domain || undefined,
+    updatedAt: row.updated_at || 0,
+  };
 }
 
 // ==========================================
@@ -142,11 +200,18 @@ async function initSchema(db: SQLite.SQLiteDatabase): Promise<void> {
 
 export async function upsertNovel(novel: Novel): Promise<void> {
   const now = Date.now();
+  const provider = novel.provider || 'lncrawl';
+  const novelPath = novel.path || novel.url || null;
+
   if (Platform.OS === 'web') {
     const map = await readWebMap<Novel>(WEB_KEYS.NOVELS);
     const existing = map[novel.id];
     map[novel.id] = {
+      ...existing,
       ...novel,
+      provider: novel.provider || existing?.provider || 'lncrawl',
+      path: novel.path || novel.url || existing?.path,
+      sourceDomain: novel.sourceDomain || existing?.sourceDomain,
       localCoverPath: novel.localCoverPath ?? existing?.localCoverPath ?? null,
       isDownloaded: Boolean(novel.isDownloaded || existing?.isDownloaded),
       updatedAt: now,
@@ -159,18 +224,21 @@ export async function upsertNovel(novel: Novel): Promise<void> {
   const genresJson = JSON.stringify(novel.genres || []);
 
   await db.runAsync(
-    `INSERT INTO novels (id, title, author, synopsis, cover_url, local_cover_path, genres, status, total_chapters, is_downloaded, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO novels (id, title, author, synopsis, cover_url, local_cover_path, genres, status, total_chapters, is_downloaded, provider, path, source_domain, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        title = excluded.title,
        author = excluded.author,
        synopsis = excluded.synopsis,
-       cover_url = excluded.cover_url,
+       cover_url = CASE WHEN excluded.cover_url IS NOT NULL AND excluded.cover_url != '' THEN excluded.cover_url ELSE novels.cover_url END,
        local_cover_path = COALESCE(excluded.local_cover_path, novels.local_cover_path),
        genres = excluded.genres,
        status = excluded.status,
        total_chapters = excluded.total_chapters,
        is_downloaded = MAX(novels.is_downloaded, excluded.is_downloaded),
+       provider = COALESCE(excluded.provider, novels.provider, 'lncrawl'),
+       path = COALESCE(excluded.path, novels.path),
+       source_domain = COALESCE(excluded.source_domain, novels.source_domain),
        updated_at = excluded.updated_at`,
     [
       novel.id,
@@ -183,6 +251,9 @@ export async function upsertNovel(novel: Novel): Promise<void> {
       novel.status || 'Ongoing',
       novel.totalChapters || 0,
       novel.isDownloaded ? 1 : 0,
+      provider,
+      novelPath,
+      novel.sourceDomain || null,
       now,
     ]
   );
@@ -201,6 +272,7 @@ export async function getNovelById(id: string): Promise<Novel | null> {
     ).length;
     return {
       ...novel,
+      provider: novel.provider || 'lncrawl',
       downloadedChaptersCount: downloadedCount,
       isDownloaded: Boolean(novel.isDownloaded || downloadedCount > 0),
     };
@@ -216,20 +288,7 @@ export async function getNovelById(id: string): Promise<Novel | null> {
 
   if (!row) return null;
 
-  return {
-    id: row.id,
-    title: row.title,
-    author: row.author || 'Unknown',
-    synopsis: row.synopsis || '',
-    coverUrl: row.cover_url || '',
-    localCoverPath: row.local_cover_path,
-    genres: JSON.parse(row.genres || '[]'),
-    status: (row.status as any) || 'Ongoing',
-    totalChapters: row.total_chapters || 0,
-    downloadedChaptersCount: row.downloaded_count || 0,
-    isDownloaded: row.is_downloaded === 1,
-    updatedAt: row.updated_at || 0,
-  };
+  return mapNovelRow(row);
 }
 
 export async function getAllNovels(): Promise<Novel[]> {
@@ -242,6 +301,7 @@ export async function getAllNovels(): Promise<Novel[]> {
     return Object.values(novelsMap)
       .map((n) => ({
         ...n,
+        provider: n.provider || 'lncrawl',
         downloadedChaptersCount: allChapters.filter(
           (c) => c.novelId === n.id && c.isDownloaded
         ).length,
@@ -256,20 +316,7 @@ export async function getAllNovels(): Promise<Novel[]> {
      FROM novels n ORDER BY n.updated_at DESC`
   );
 
-  return rows.map((row: NovelRow) => ({
-    id: row.id,
-    title: row.title,
-    author: row.author || 'Unknown',
-    synopsis: row.synopsis || '',
-    coverUrl: row.cover_url || '',
-    localCoverPath: row.local_cover_path,
-    genres: JSON.parse(row.genres || '[]'),
-    status: (row.status as any) || 'Ongoing',
-    totalChapters: row.total_chapters || 0,
-    downloadedChaptersCount: row.downloaded_count || 0,
-    isDownloaded: row.is_downloaded === 1,
-    updatedAt: row.updated_at || 0,
-  }));
+  return rows.map((row: NovelRow) => mapNovelRow(row));
 }
 
 export async function getDownloadedNovels(): Promise<Novel[]> {
@@ -287,20 +334,7 @@ export async function getDownloadedNovels(): Promise<Novel[]> {
      ORDER BY n.updated_at DESC`
   );
 
-  return rows.map((row: NovelRow) => ({
-    id: row.id,
-    title: row.title,
-    author: row.author || 'Unknown',
-    synopsis: row.synopsis || '',
-    coverUrl: row.cover_url || '',
-    localCoverPath: row.local_cover_path,
-    genres: JSON.parse(row.genres || '[]'),
-    status: (row.status as any) || 'Ongoing',
-    totalChapters: row.total_chapters || 0,
-    downloadedChaptersCount: row.downloaded_count || 0,
-    isDownloaded: true,
-    updatedAt: row.updated_at || 0,
-  }));
+  return rows.map((row: NovelRow) => mapNovelRow(row, true));
 }
 
 export async function deleteNovel(id: string): Promise<void> {
@@ -335,6 +369,8 @@ export async function deleteNovel(id: string): Promise<void> {
 
 export async function saveChapter(chapter: Chapter): Promise<void> {
   const hasContent = Boolean(chapter.content && chapter.content.trim().length > 0);
+  const provider = chapter.provider || 'lncrawl';
+  const chapterPath = chapter.path || chapter.url || null;
 
   if (Platform.OS === 'web') {
     const map = await readWebMap<Chapter>(WEB_KEYS.CHAPTERS);
@@ -342,6 +378,8 @@ export async function saveChapter(chapter: Chapter): Promise<void> {
     map[chapter.id] = {
       ...existing,
       ...chapter,
+      provider: chapter.provider || existing?.provider || 'lncrawl',
+      path: chapter.path || chapter.url || existing?.path,
       content: chapter.content ?? existing?.content ?? null,
       isDownloaded: hasContent || Boolean(existing?.isDownloaded) || Boolean(chapter.isDownloaded),
     };
@@ -359,13 +397,15 @@ export async function saveChapter(chapter: Chapter): Promise<void> {
   const db = await getDatabase();
 
   await db.runAsync(
-    `INSERT INTO chapters (id, novel_id, serial, title, content, is_downloaded, words_count, release_date)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO chapters (id, novel_id, serial, title, content, is_downloaded, provider, path, words_count, release_date)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        serial = excluded.serial,
        title = excluded.title,
        content = COALESCE(excluded.content, chapters.content),
        is_downloaded = CASE WHEN excluded.content IS NOT NULL THEN 1 ELSE chapters.is_downloaded END,
+       provider = COALESCE(excluded.provider, chapters.provider, 'lncrawl'),
+       path = COALESCE(excluded.path, chapters.path),
        words_count = excluded.words_count,
        release_date = excluded.release_date`,
     [
@@ -375,6 +415,8 @@ export async function saveChapter(chapter: Chapter): Promise<void> {
       chapter.title,
       chapter.content || null,
       hasContent ? 1 : chapter.isDownloaded ? 1 : 0,
+      provider,
+      chapterPath,
       chapter.wordsCount || 0,
       chapter.releaseDate || '',
     ]
@@ -394,6 +436,8 @@ export async function saveChaptersBatch(chapters: Chapter[]): Promise<void> {
       map[ch.id] = {
         ...existing,
         ...ch,
+        provider: ch.provider || existing?.provider || 'lncrawl',
+        path: ch.path || ch.url || existing?.path,
         content: ch.content ?? existing?.content ?? null,
         isDownloaded: hasContent || Boolean(existing?.isDownloaded) || Boolean(ch.isDownloaded),
       };
@@ -406,14 +450,18 @@ export async function saveChaptersBatch(chapters: Chapter[]): Promise<void> {
   await db.withExclusiveTransactionAsync(async (txn) => {
     for (const ch of chapters) {
       const hasContent = Boolean(ch.content && ch.content.trim().length > 0);
+      const provider = ch.provider || 'lncrawl';
+      const chapterPath = ch.path || ch.url || null;
       await txn.runAsync(
-        `INSERT INTO chapters (id, novel_id, serial, title, content, is_downloaded, words_count, release_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO chapters (id, novel_id, serial, title, content, is_downloaded, provider, path, words_count, release_date)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            serial = excluded.serial,
            title = excluded.title,
            content = COALESCE(excluded.content, chapters.content),
            is_downloaded = CASE WHEN excluded.content IS NOT NULL THEN 1 ELSE chapters.is_downloaded END,
+           provider = COALESCE(excluded.provider, chapters.provider, 'lncrawl'),
+           path = COALESCE(excluded.path, chapters.path),
            words_count = excluded.words_count,
            release_date = excluded.release_date`,
         [
@@ -423,6 +471,8 @@ export async function saveChaptersBatch(chapters: Chapter[]): Promise<void> {
           ch.title,
           ch.content || null,
           hasContent ? 1 : ch.isDownloaded ? 1 : 0,
+          provider,
+          chapterPath,
           ch.wordsCount || 0,
           ch.releaseDate || '',
         ]
@@ -437,7 +487,8 @@ export async function saveChaptersBatch(chapters: Chapter[]): Promise<void> {
 export async function getChapterById(id: string): Promise<Chapter | null> {
   if (Platform.OS === 'web') {
     const map = await readWebMap<Chapter>(WEB_KEYS.CHAPTERS);
-    return map[id] || null;
+    const ch = map[id];
+    return ch ? { ...ch, provider: ch.provider || 'lncrawl' } : null;
   }
 
   const db = await getDatabase();
@@ -451,6 +502,8 @@ export async function getChapterById(id: string): Promise<Chapter | null> {
     title: row.title,
     content: row.content,
     isDownloaded: row.is_downloaded === 1,
+    provider: row.provider || 'lncrawl',
+    path: row.path || undefined,
     wordsCount: row.words_count || 0,
     releaseDate: row.release_date || '',
   };
@@ -461,12 +514,13 @@ export async function getChaptersForNovel(novelId: string): Promise<Chapter[]> {
     const map = await readWebMap<Chapter>(WEB_KEYS.CHAPTERS);
     return Object.values(map)
       .filter((c) => c.novelId === novelId)
+      .map((c) => ({ ...c, provider: c.provider || 'lncrawl' }))
       .sort((a, b) => a.serial - b.serial);
   }
 
   const db = await getDatabase();
   const rows = await db.getAllAsync<ChapterRow>(
-    `SELECT id, novel_id, serial, title, is_downloaded, words_count, release_date
+    `SELECT id, novel_id, serial, title, is_downloaded, provider, path, words_count, release_date
      FROM chapters WHERE novel_id = ? ORDER BY serial ASC`,
     [novelId]
   );
@@ -477,6 +531,8 @@ export async function getChaptersForNovel(novelId: string): Promise<Chapter[]> {
     serial: r.serial,
     title: r.title,
     isDownloaded: r.is_downloaded === 1,
+    provider: r.provider || 'lncrawl',
+    path: r.path || undefined,
     wordsCount: r.words_count || 0,
     releaseDate: r.release_date || '',
   }));
@@ -487,6 +543,7 @@ export async function getDownloadedChaptersForNovel(novelId: string): Promise<Ch
     const map = await readWebMap<Chapter>(WEB_KEYS.CHAPTERS);
     return Object.values(map)
       .filter((c) => c.novelId === novelId && c.isDownloaded)
+      .map((c) => ({ ...c, provider: c.provider || 'lncrawl' }))
       .sort((a, b) => a.serial - b.serial);
   }
 
@@ -503,6 +560,8 @@ export async function getDownloadedChaptersForNovel(novelId: string): Promise<Ch
     title: r.title,
     content: r.content,
     isDownloaded: true,
+    provider: r.provider || 'lncrawl',
+    path: r.path || undefined,
     wordsCount: r.words_count || 0,
     releaseDate: r.release_date || '',
   }));

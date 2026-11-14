@@ -24,6 +24,12 @@ import {
   deleteLocalCover,
 } from '../../src/services/fileStorage';
 import { getReaderSettings, saveReaderSettings } from '../../src/services/storage';
+import {
+  runSourceDiagnostic,
+  Source,
+  SourceDiagnosticResult,
+  SOURCES,
+} from '../../src/sources';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -36,6 +42,12 @@ export default function SettingsScreen() {
     lineSpacing: 1.8,
     fontFamily: 'serif',
   });
+
+  // Sources diagnostic state
+  const [runningDiagnostics, setRunningDiagnostics] = useState<Record<string, boolean>>({});
+  const [diagnosticResults, setDiagnosticResults] = useState<
+    Record<string, SourceDiagnosticResult>
+  >({});
 
   const loadSettingsData = useCallback(async () => {
     try {
@@ -69,6 +81,37 @@ export default function SettingsScreen() {
     await saveReaderSettings(updated);
   };
 
+  const handleTestSingleSource = async (source: Source) => {
+    setRunningDiagnostics((prev) => ({ ...prev, [source.id]: true }));
+    try {
+      const result = await runSourceDiagnostic(source);
+      setDiagnosticResults((prev) => ({ ...prev, [source.id]: result }));
+    } finally {
+      setRunningDiagnostics((prev) => ({ ...prev, [source.id]: false }));
+    }
+  };
+
+  const handleTestAllSources = async () => {
+    const loadingMap: Record<string, boolean> = {};
+    for (const s of SOURCES) {
+      loadingMap[s.id] = true;
+    }
+    setRunningDiagnostics((prev) => ({ ...prev, ...loadingMap }));
+
+    await Promise.allSettled(
+      SOURCES.map(async (source) => {
+        try {
+          const result = await runSourceDiagnostic(source);
+          setDiagnosticResults((prev) => ({ ...prev, [source.id]: result }));
+        } finally {
+          setRunningDiagnostics((prev) => ({ ...prev, [source.id]: false }));
+        }
+      })
+    );
+  };
+
+  const isAnyDiagnosticRunning = Object.values(runningDiagnostics).some(Boolean);
+
   const handleDeleteNovelStorage = (novel: Novel) => {
     Alert.alert(
       'Delete Offline Downloads?',
@@ -99,7 +142,7 @@ export default function SettingsScreen() {
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <Text style={styles.screenTitle}>Settings</Text>
         <Text style={styles.screenSubtitle}>
-          Storage management, default reading preferences, and backend details
+          Storage management, local source diagnostics, reading preferences, and backend details
         </Text>
 
         {/* Storage Management Category */}
@@ -196,6 +239,119 @@ export default function SettingsScreen() {
             ))}
           </View>
         ) : null}
+
+        {/* Sources Section & Diagnostic */}
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>SOURCES</Text>
+          <Pressable
+            style={[
+              styles.testAllBtn,
+              isAnyDiagnosticRunning && styles.testAllBtnDisabled,
+            ]}
+            onPress={handleTestAllSources}
+            disabled={isAnyDiagnosticRunning}
+          >
+            {isAnyDiagnosticRunning ? (
+              <ActivityIndicator size="small" color="#0D0F14" />
+            ) : (
+              <>
+                <Ionicons name="pulse-outline" size={14} color="#0D0F14" />
+                <Text style={styles.testAllBtnText}>Test source</Text>
+              </>
+            )}
+          </Pressable>
+        </View>
+
+        <View style={styles.sourcesCard}>
+          <Text style={styles.sourcesIntro}>
+            Diagnostic checks search ("love"), novel page, chapter list, and first chapter text directly from your phone.
+          </Text>
+
+          {SOURCES.map((source, idx) => {
+            const isTesting = Boolean(runningDiagnostics[source.id]);
+            const diag = diagnosticResults[source.id];
+            const isLast = idx === SOURCES.length - 1;
+
+            return (
+              <View
+                key={source.id}
+                style={[styles.sourceItemRow, isLast && styles.sourceItemRowLast]}
+              >
+                <View style={styles.sourceItemHeader}>
+                  <View style={styles.sourceItemInfo}>
+                    <Text style={styles.sourceItemName}>{source.name}</Text>
+                    <Text style={styles.sourceItemSite} numberOfLines={1}>
+                      {source.site}
+                    </Text>
+                  </View>
+
+                  <View style={styles.sourceItemActions}>
+                    {diag && !isTesting && (
+                      <View
+                        style={[
+                          styles.diagBadge,
+                          diag.passed ? styles.diagBadgePass : styles.diagBadgeFail,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.diagBadgeText,
+                            diag.passed
+                              ? styles.diagBadgeTextPass
+                              : styles.diagBadgeTextFail,
+                          ]}
+                        >
+                          {diag.passed ? 'PASS' : 'FAIL'}
+                        </Text>
+                      </View>
+                    )}
+
+                    <Pressable
+                      style={styles.singleTestBtn}
+                      onPress={() => handleTestSingleSource(source)}
+                      disabled={isTesting}
+                    >
+                      {isTesting ? (
+                        <ActivityIndicator size="small" color={Colors.primary} />
+                      ) : (
+                        <Text style={styles.singleTestBtnText}>Test</Text>
+                      )}
+                    </Pressable>
+                  </View>
+                </View>
+
+                {diag && (
+                  <View style={styles.diagStepsBox}>
+                    {diag.steps.map((st, sIdx) => (
+                      <View key={`${source.id}-${st.step}-${sIdx}`} style={styles.diagStepRow}>
+                        <Ionicons
+                          name={st.passed ? 'checkmark-circle' : 'close-circle'}
+                          size={14}
+                          color={st.passed ? Colors.success : Colors.danger}
+                        />
+                        <Text
+                          style={[
+                            styles.diagStepLabel,
+                            !st.passed && styles.diagStepLabelFail,
+                          ]}
+                        >
+                          {st.passed ? 'PASS' : 'FAIL'} • {st.label}:
+                        </Text>
+                        <Text style={styles.diagStepDetail}>
+                          {st.httpStatus ? `[HTTP ${st.httpStatus}] ` : ''}
+                          {st.detail}
+                        </Text>
+                      </View>
+                    ))}
+                    <Text style={styles.diagDurationText}>
+                      Completed in {(diag.durationMs / 1000).toFixed(2)}s
+                    </Text>
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
 
         {/* Default Reading Preferences Category (persisted via storage.ts) */}
         <Text style={styles.sectionTitle}>READING PREFERENCES</Text>
@@ -359,6 +515,30 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: 8,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    marginTop: 6,
+  },
+  testAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: Colors.primary,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  testAllBtnDisabled: {
+    opacity: 0.6,
+  },
+  testAllBtnText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#0D0F14',
+  },
   statsCard: {
     backgroundColor: Colors.surface,
     borderRadius: 12,
@@ -475,6 +655,126 @@ const styles = StyleSheet.create({
     padding: 8,
     borderRadius: 6,
     backgroundColor: Colors.dangerMuted,
+  },
+  sourcesCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: 14,
+    marginBottom: 22,
+  },
+  sourcesIntro: {
+    fontSize: 11,
+    color: Colors.textMuted,
+    lineHeight: 16,
+    marginBottom: 10,
+  },
+  sourceItemRow: {
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
+  sourceItemRowLast: {
+    paddingBottom: 2,
+  },
+  sourceItemHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  sourceItemInfo: {
+    flex: 1,
+  },
+  sourceItemName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Colors.text,
+  },
+  sourceItemSite: {
+    fontSize: 11,
+    color: Colors.textMuted,
+    fontFamily: 'monospace',
+    marginTop: 2,
+  },
+  sourceItemActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  diagBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  diagBadgePass: {
+    backgroundColor: 'rgba(16, 185, 129, 0.14)',
+    borderColor: 'rgba(16, 185, 129, 0.45)',
+  },
+  diagBadgeFail: {
+    backgroundColor: Colors.dangerMuted,
+    borderColor: 'rgba(239, 68, 68, 0.45)',
+  },
+  diagBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  diagBadgeTextPass: {
+    color: Colors.success,
+  },
+  diagBadgeTextFail: {
+    color: Colors.danger,
+  },
+  singleTestBtn: {
+    backgroundColor: Colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    minWidth: 52,
+    alignItems: 'center',
+  },
+  singleTestBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Colors.primary,
+  },
+  diagStepsBox: {
+    marginTop: 10,
+    backgroundColor: Colors.background,
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    gap: 6,
+  },
+  diagStepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+  },
+  diagStepLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Colors.success,
+  },
+  diagStepLabelFail: {
+    color: Colors.danger,
+  },
+  diagStepDetail: {
+    flex: 1,
+    fontSize: 11,
+    color: Colors.textSecondary,
+    lineHeight: 15,
+  },
+  diagDurationText: {
+    fontSize: 10,
+    color: Colors.textMuted,
+    marginTop: 2,
+    fontFamily: 'monospace',
   },
   prefsCard: {
     backgroundColor: Colors.surface,

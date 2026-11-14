@@ -1,0 +1,937 @@
+# PROJECT MASTER PROMPT: PAPER — COMPLETE NOVEL DISCOVERY, DOWNLOADER & OFFLINE READER
+
+## 1. YOUR ROLE
+
+Act as a senior React Native engineer, Expo architect, backend integration engineer, and mobile application designer.
+
+You are working on an existing project called **Paper**, a mobile light-novel discovery, downloading, library, and reading application.
+
+Your task is to inspect, improve, debug, and complete the existing application.
+
+You are NOT starting a new project.
+
+You MUST use the existing GitHub repository as your source of truth:
+
+https://github.com/MKSev3n/paper-v3
+
+Work directly within the existing repository.
+
+Do not create a separate project or replace the existing architecture without a compelling technical reason.
+
+---
+
+## 2. PROJECT VISION
+
+Paper should be a fully functional mobile novel reader inspired by the functionality of command-line novel crawlers and downloaders, but with a polished graphical interface.
+
+The application should allow users to:
+
+1. Discover novels from supported online sources.
+2. Search for novels using their titles and keywords.
+3. Retrieve novel metadata, descriptions, authors, covers, and chapter lists.
+4. Download individual chapters or entire novels.
+5. Monitor download progress.
+6. Save downloaded novels on the device.
+7. Read downloaded chapters without internet access.
+8. Continue reading from the last saved position.
+9. Bookmark chapters and manage reading preferences.
+10. Export downloaded novels as EPUB where supported.
+
+The goal is to make Paper a complete, offline-capable novel reading application.
+
+---
+
+## 3. EXISTING BACKEND
+
+Paper already has a hosted Lightnovel Crawler backend.
+
+API BASE URL:
+
+https://lightnovel-crawler-vit0.onrender.com/
+
+Confirmed backend information:
+
+- Software: Lightnovel Crawler
+- Version: 4.14.0
+- OpenAPI: 3.1
+- Health status: ok
+- Hosting: Self-hosted on Render
+
+The server has a Swagger interface:
+
+https://lightnovel-crawler-vit0.onrender.com/docs
+
+OpenAPI specification:
+
+https://lightnovel-crawler-vit0.onrender.com/openapi.json
+
+IMPORTANT:
+
+Inspect the actual OpenAPI specification before implementing or changing any API integration.
+
+Do not invent API endpoints, request parameters, authentication requirements, or response structures.
+
+The backend is already deployed. Do not attempt to deploy another crawler or replace the existing backend.
+
+---
+
+## 4. EXISTING PROJECT ARCHITECTURE
+
+Inspect the current project before making changes.
+
+The repository uses:
+
+- React Native
+- Expo
+- TypeScript
+- Expo Router
+- SQLite
+- Expo FileSystem
+- Expo SecureStore
+- AsyncStorage
+
+Existing important files include:
+
+### Application screens
+
+- app/(tabs)/index.tsx
+- app/(tabs)/discover.tsx
+- app/(tabs)/downloads.tsx
+- app/(tabs)/settings.tsx
+- app/novel/[id].tsx
+- app/reader/[id].tsx
+
+### Services
+
+- src/services/lncrawl.ts
+- src/services/database.ts
+- src/services/downloadManager.ts
+- src/services/fileStorage.ts
+- src/services/storage.ts
+
+### Configuration and types
+
+- src/config.ts
+- src/types/index.ts
+- src/theme/colors.ts
+- package.json
+- app.json
+- eas.json
+
+Preserve the existing navigation, design system, database architecture, reader functionality, and working services.
+
+Before modifying anything:
+
+1. Inspect all relevant source files.
+2. Understand how the existing screens communicate.
+3. Identify existing implementations that can be reused.
+4. Identify incomplete features and actual bugs.
+5. Prepare a short implementation plan.
+6. Implement changes incrementally.
+
+Do not delete working features just to simplify development.
+
+---
+
+# 5. CORE FEATURE: NOVEL DISCOVERY AND SEARCH
+
+This is the highest-priority feature.
+
+The current search experience does not reliably return novels from the hosted LNCrawl backend.
+
+Investigate and fix this before expanding other functionality.
+
+### Expected search experience
+
+A user should be able to:
+
+1. Open Discover.
+2. Enter a novel title.
+3. Submit the search.
+4. See a loading indicator.
+5. Receive matching novels from the crawler.
+6. Open a result to view its details.
+
+### Search implementation
+
+Inspect the current implementation in:
+
+- app/(tabs)/discover.tsx
+- src/services/lncrawl.ts
+- src/config.ts
+
+The existing service already contains methods for:
+
+- Searching the server's novel database.
+- Creating external source search jobs.
+- Polling background jobs.
+- Fetching novel metadata.
+- Retrieving results.
+
+Validate every operation against the live OpenAPI specification.
+
+The expected search workflow should support:
+
+**Step A: Search existing server database**
+
+Use the actual documented novel-search endpoint.
+
+**Step B: External source search**
+
+When a genuine database miss occurs, use the documented external source search functionality.
+
+The existing implementation references:
+
+POST /api/job/create/search-sources
+
+**Step C: Monitor search job**
+
+Use the documented job-status endpoint.
+
+The existing implementation references:
+
+GET /api/job/{id}
+
+**Step D: Retrieve external search results**
+
+Inspect the completed job response and correctly process its search results.
+
+Step E: Fetch novel metadata
+
+Where necessary, use the documented novel-fetching job.
+
+The existing implementation references:
+
+POST /api/job/create/fetch-novels
+
+Step F: Refresh search results
+
+Query the server database again and display the discovered novels.
+
+Do not assume that a successful search job automatically means novel metadata has already been saved.
+
+Search UX requirements
+
+Implement:
+
+Search by title.
+
+Search by keyword.
+
+Search by author where supported.
+
+Search submission through the keyboard.
+
+Search button functionality.
+
+Clear search functionality.
+
+Loading indicators.
+
+External source search progress.
+
+Empty results state.
+
+Network error state.
+
+Authentication error state.
+
+Retry functionality.
+
+Duplicate search prevention.
+
+Never silently swallow errors.
+
+Show meaningful messages when the backend fails.
+
+Do not display fake search results or sample novels as live API results.
+
+6. AUTHENTICATION
+
+The hosted LNCrawl server exposes authentication endpoints.
+
+Inspect the actual authentication schema.
+
+Paper should support:
+
+User login.
+
+Session persistence.
+
+Token verification.
+
+Logout.
+
+Authentication error handling.
+
+Use Expo SecureStore for sensitive authentication tokens.
+
+Never hardcode usernames, passwords, administrator credentials, or bearer tokens in the application.
+
+Do not require authentication for endpoints that are genuinely public according to the server specification.
+
+Clearly distinguish:
+
+Server connection status.
+
+Authentication status.
+
+Search availability.
+
+Download availability.
+
+A healthy server does not automatically mean an authenticated user session exists.
+
+7. NOVEL DETAILS
+
+Improve the existing novel details screen.
+
+When a user opens a novel, display:
+
+Novel cover.
+
+Title.
+
+Author.
+
+Description.
+
+Genres.
+
+Publication status.
+
+Source website.
+
+Total chapter count.
+
+Downloaded chapter count.
+
+Available chapters.
+
+Chapter management
+
+Support:
+
+Chapter list.
+
+Chapter numbering.
+
+Chapter titles.
+
+Download status.
+
+Download individual chapters.
+
+Download selected chapters.
+
+Download all available chapters.
+
+Filter downloaded chapters.
+
+Sort chapters.
+
+Use the existing database to preserve chapter information.
+
+Do not fetch the entire novel unnecessarily when the user only needs its metadata.
+
+8. DOWNLOAD MANAGER
+
+Complete and improve:
+
+src/services/downloadManager.ts
+
+Paper must support reliable chapter downloading.
+
+Download functionality
+
+Users should be able to:
+
+Download one chapter.
+
+Download multiple selected chapters.
+
+Download an entire novel.
+
+Resume eligible interrupted downloads.
+
+Retry failed downloads.
+
+Cancel downloads.
+
+Monitor progress.
+
+Download interface
+
+Display:
+
+Novel title.
+
+Current chapter.
+
+Completed chapters.
+
+Total chapters.
+
+Percentage progress.
+
+Download status.
+
+Error information.
+
+Implement sensible concurrency limits to avoid overwhelming the backend or device.
+
+Prevent duplicate download tasks.
+
+Do not mark a chapter as downloaded until its content has been successfully saved locally.
+
+Handle:
+
+Internet interruptions.
+
+Server errors.
+
+Missing chapter content.
+
+Invalid responses.
+
+Interrupted downloads.
+
+App restarts.
+
+Persist download records in SQLite so the interface can recover task information after restarting the app.
+
+Do not promise background downloading if the chosen implementation cannot reliably support it on Android.
+
+9. LOCAL STORAGE AND OFFLINE LIBRARY
+
+Use the existing services:
+
+src/services/database.ts
+
+src/services/fileStorage.ts
+
+The local library must remain available even when the hosted backend is unavailable.
+
+Storage requirements
+
+Store:
+
+Novel metadata.
+
+Chapter metadata.
+
+Downloaded chapter content.
+
+Downloaded cover images.
+
+Reading progress.
+
+Bookmarks.
+
+Download history.
+
+Use app-private storage for downloaded content.
+
+Avoid storing large chapter contents in AsyncStorage.
+
+Use SQLite for structured metadata and reading progress.
+
+Use FileSystem for ebook files and other large assets where appropriate.
+
+Offline functionality
+
+When a novel is downloaded:
+
+It should appear in My Library.
+
+Its downloaded chapters should be accessible without internet.
+
+The user should be able to open downloaded chapters.
+
+Reading progress should persist.
+
+The app should not unnecessarily contact the backend when opening cached chapter content.
+
+When internet connectivity returns, allow appropriate metadata and reading-history synchronization.
+
+Never delete downloaded content simply because the server becomes unavailable.
+
+10. IN-APP READER
+
+Preserve and improve the existing reader:
+
+app/reader/[id].tsx
+
+The reader should provide a comfortable reading experience.
+
+Core reader features
+
+Display chapter content.
+
+Previous chapter navigation.
+
+Next chapter navigation.
+
+Chapter title and numbering.
+
+Continue reading.
+
+Automatic reading progress saving.
+
+Manual bookmarking.
+
+Download current chapter.
+
+Offline reading.
+
+Reading customization
+
+Support:
+
+Dark theme.
+
+Light theme.
+
+Sepia theme.
+
+Adjustable font size.
+
+Font family selection.
+
+Line spacing.
+
+Reading margins.
+
+Save reading preferences locally.
+
+Reading progress
+
+Persist:
+
+Novel ID.
+
+Chapter ID.
+
+Chapter number.
+
+Scroll position.
+
+Scroll percentage.
+
+Last-read timestamp.
+
+When reopening a novel, offer the user the option to continue reading.
+
+Ensure progress saving does not cause unnecessary database writes during every tiny scroll movement.
+
+11. EPUB SUPPORT
+
+LNCrawl supports ebook generation through its artifact functionality.
+
+Inspect the live API specification for:
+
+Ebook generation jobs.
+
+Artifact retrieval.
+
+Artifact metadata.
+
+File download URLs.
+
+The existing service references:
+
+POST /api/job/create/make-artifacts
+
+GET /api/novel/{novel_id}/artifacts
+
+GET /api/artifact/{artifact_id}
+
+Validate these endpoints and their actual response schemas.
+
+Paper should support EPUB generation and downloading where the backend provides it.
+
+Store EPUB files locally.
+
+Allow users to export or share EPUB files.
+
+If EPUB reading is supported, integrate a compatible reader without breaking the existing chapter-based reader.
+
+Do not confuse EPUB export with the ability to read downloaded chapters offline. Both capabilities should work independently.
+
+12. USER INTERFACE AND DESIGN
+
+Preserve Paper's existing visual identity.
+
+Current design direction:
+
+Dark interface.
+
+Background: #0D0F14.
+
+Minimalist reading experience.
+
+Clean typography.
+
+Comfortable spacing.
+
+Subtle borders.
+
+Consistent accent colours.
+
+Native-feeling Android interactions.
+
+Improve visual consistency across:
+
+Home.
+
+Discover.
+
+Novel details.
+
+Downloads.
+
+Reader.
+
+Settings.
+
+Avoid unnecessary redesigns.
+
+Do not introduce excessive animations or large dependencies without a clear benefit.
+
+The app must remain responsive on ordinary Android devices.
+
+13. NAVIGATION
+
+Preserve Expo Router.
+
+The primary navigation should provide access to:
+
+Home.
+
+Discover.
+
+Downloads / Library.
+
+Settings.
+
+Ensure:
+
+Novel details open correctly.
+
+Reader navigation works.
+
+Back navigation does not crash when a screen is opened directly.
+
+Deep links do not assume a previous navigation history exists.
+
+Use router.canGoBack() where appropriate before calling router.back().
+
+14. SETTINGS AND STORAGE MANAGEMENT
+
+Complete the existing settings screen.
+
+Provide:
+
+Backend URL display.
+
+Connection testing.
+
+Authentication management.
+
+Reader preferences.
+
+Storage usage.
+
+Downloaded novel count.
+
+Downloaded chapter count.
+
+Clear cache.
+
+Delete downloaded content.
+
+Logout.
+
+Ask for confirmation before destructive operations.
+
+Never delete reading progress when clearing downloaded chapter content unless the user explicitly requests it.
+
+15. API RELIABILITY AND SECURITY
+
+Implement a robust API service layer.
+
+Requirements:
+
+Configurable backend base URL.
+
+Request timeout handling.
+
+Cold-start handling for Render.
+
+Safe GET retries.
+
+No blind retries for non-idempotent POST requests.
+
+Clear HTTP error messages.
+
+Correct JSON parsing.
+
+Authentication handling.
+
+Job polling with timeouts.
+
+Duplicate job prevention.
+
+Proper loading-state cleanup.
+
+Do not expose administrator credentials or private API secrets in the client application.
+
+Use secure token storage.
+
+Do not invent endpoints.
+
+Use the live OpenAPI specification as the source of truth.
+
+Respect source website terms, applicable copyright rules, and LNCrawl's GPL-3.0 licensing obligations.
+
+16. TESTING REQUIREMENTS
+
+Do not consider a feature complete simply because TypeScript compiles.
+
+Test actual functionality.
+
+Search tests
+
+Search a known novel.
+
+Search a nonexistent novel.
+
+Search with an empty query.
+
+Search while offline.
+
+Search when authentication is required.
+
+Search after a cold server start.
+
+Search when a background job fails.
+
+Search when multiple sources return results.
+
+Download tests
+
+Download one chapter.
+
+Download multiple chapters.
+
+Download an entire novel.
+
+Interrupt a download.
+
+Retry a failed download.
+
+Restart the app during or after downloading.
+
+Offline tests
+
+Enable airplane mode.
+
+Open the library.
+
+Open a downloaded novel.
+
+Read downloaded chapters.
+
+Navigate between cached chapters.
+
+Restart the app and verify reading progress.
+
+Reader tests
+
+Change font size.
+
+Change theme.
+
+Save a bookmark.
+
+Navigate between chapters.
+
+Resume reading.
+
+17. BUILD AND DEPLOYMENT
+
+The target platform is Android.
+
+Preserve the existing Expo and EAS configuration.
+
+Inspect package.json, app.json, eas.json, and the installed Expo SDK before changing dependencies.
+
+Do not blindly upgrade Expo or React Native.
+
+Resolve dependency conflicts using Expo-compatible package versions.
+
+Run:
+
+npm install
+
+npx expo-doctor
+
+npx tsc --noEmit
+
+npx expo export --platform android
+
+Resolve any errors introduced by your changes.
+
+The existing eas.json includes a preview profile configured for APK output.
+
+Use:
+
+npx eas build --platform android --profile preview
+
+Do not claim the APK was successfully built unless the build actually completes.
+
+18. DEVELOPMENT WORKFLOW — VERY IMPORTANT
+
+Work in the following order.
+
+Phase 1 — Repository audit
+
+Inspect the complete project and report:
+
+Existing architecture.
+
+Working functionality.
+
+Incomplete functionality.
+
+Identified bugs.
+
+Dependency issues.
+
+API integration issues.
+
+Do not modify code until the audit is complete.
+
+Phase 2 — Fix LNCrawl search
+
+This is the first implementation priority.
+
+Make search functional against the actual hosted server.
+
+Verify the complete search pipeline.
+
+Phase 3 — Complete novel details
+
+Verify metadata and chapter retrieval.
+
+Phase 4 — Complete downloads
+
+Verify individual, multiple, and full-novel downloading.
+
+Phase 5 — Complete local storage
+
+Verify downloaded content persists across app restarts.
+
+Phase 6 — Complete reader
+
+Verify offline reading, navigation, bookmarks, and progress persistence.
+
+Phase 7 — EPUB support
+
+Verify ebook generation, artifact retrieval, and local storage.
+
+Phase 8 — Final quality assurance
+
+Run type checking, Expo diagnostics, Android bundling, and functional tests.
+
+Prepare the Android APK.
+
+19. RULES YOU MUST FOLLOW
+
+Work from the existing GitHub repository.
+
+Do not create a new Expo project.
+
+Do not replace the entire application with generated boilerplate.
+
+Do not delete existing working features.
+
+Do not replace the hosted LNCrawl backend.
+
+Do not use fake novel data as a substitute for real API results.
+
+Do not invent undocumented API endpoints.
+
+Do not expose credentials.
+
+Do not silently swallow errors.
+
+Do not upgrade dependencies unnecessarily.
+
+Do not make large architectural changes without explaining why.
+
+Do not claim a feature works without testing it.
+
+Keep the project compatible with Android.
+
+Preserve the existing Paper design direction.
+
+Make changes incrementally and keep the repository buildable.
+
+If a feature cannot be completed because of a backend limitation, explain the exact limitation and propose a compatible solution rather than pretending it works.
+
+20. FINAL DELIVERABLE
+
+The finished application should provide this complete experience:
+
+USER OPENS PAPER
+↓
+DISCOVERS NOVELS
+↓
+SEARCHES LNCrawl SOURCES
+↓
+VIEWS NOVEL DETAILS
+↓
+SELECTS CHAPTERS OR FULL NOVEL
+↓
+DOWNLOADS CONTENT
+↓
+SAVES CONTENT LOCALLY
+↓
+OPENS MY LIBRARY
+↓
+READS WITHOUT INTERNET
+↓
+RESUMES FROM LAST READING POSITION
+
+The final deliverable is a stable, functional Android application with:
+
+Real novel discovery.
+
+Working external-source search.
+
+Novel details and chapter lists.
+
+Reliable downloads.
+
+Persistent offline library.
+
+In-app reader.
+
+Reading progress and bookmarks.
+
+EPUB support where available.
+
+Proper authentication.
+
+A successfully verified Android APK.
+
+Start by inspecting the existing repository and its actual backend API.
+
+Do not rush into generating code.
+
+First understand the application, then fix and complete it systematically.
+
+The priority is a working product, not simply producing more code.
+push the commit to GitHub
+use admin as password and email where necessary 

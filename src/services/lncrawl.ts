@@ -1,10 +1,10 @@
 /**
  * LNCrawl Service Layer for Paper Light Novel Reader
  * Aligned with the live LNCrawl FastAPI OpenAPI 3.1.0 specification.
- * Uses LNCRAWL_API_BASE from src/config.ts
+ * Uses API_URL, API_EMAIL, API_PASSWORD from src/config.ts
  */
 
-import { LNCRAWL_API_BASE, APP_CONFIG } from '../config';
+import { API_URL, API_EMAIL, API_PASSWORD, APP_CONFIG } from '../config';
 import {
   Novel,
   Chapter,
@@ -12,7 +12,9 @@ import {
   LNCrawlUser,
   LNCrawlJob,
   LNCrawlArtifact,
-  LNCrawlSearchResult,
+  LNCrawlSourceItem,
+  RawLNCrawlSearchResult,
+  ExternalSearchResult,
 } from '../types';
 import {
   getStoredAuthToken,
@@ -20,7 +22,7 @@ import {
   deleteStoredAuthToken,
 } from './storage';
 
-const BASE_URL = LNCRAWL_API_BASE.replace(/\/+$/, '');
+const BASE_URL = API_URL.replace(/\/+$/, '');
 
 export class LNCrawlError extends Error {
   status: number;
@@ -31,16 +33,139 @@ export class LNCrawlError extends Error {
   }
 }
 
+let hasWokenServer = false;
+let isWakingServer = false;
+let inFlightAuthPromise: Promise<string> | null = null;
+const wakingListeners = new Set<(waking: boolean) => void>();
+
+function setWakingState(waking: boolean) {
+  if (isWakingServer === waking) return;
+  isWakingServer = waking;
+  wakingListeners.forEach((fn) => fn(waking));
+}
+
+async function performLogin(email: string, password: string): Promise<{ token: string; user: LNCrawlUser }> {
+  const totalBudgetMs = !hasWokenServer ? APP_CONFIG.firstRequestTimeoutMs : APP_CONFIG.defaultTimeoutMs;
+  const deadline = Date.now() + totalBudgetMs;
+
+  if (!hasWokenServer) {
+    setWakingState(true);
+  }
+
+  try {
+    while (true) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new LNCrawlError(
+          'Server timed out while waking up. Render free-tier instances can take up to 60s — please retry.',
+          408
+        );
+      }
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), remainingMs);
+
+      try {
+        const res = await fetch(`${BASE_URL}/api/auth/login`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ email: email.trim(), password }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        // Render free tier can briefly emit 502/503/504 while booting the FastAPI worker
+        if (!hasWokenServer && (res.status === 502 || res.status === 503 || res.status === 504)) {
+          if (Date.now() + 3500 < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 3500));
+            continue;
+          }
+        }
+
+        hasWokenServer = true;
+
+        if (!res.ok) {
+          let errMessage = `Sign in failed (${res.status})`;
+          try {
+            const errorJson = await res.json();
+            if (typeof errorJson?.detail === 'string' && errorJson.detail) {
+              errMessage = errorJson.detail;
+            } else if (typeof errorJson?.error === 'string' && errorJson.error) {
+              errMessage = errorJson.error;
+            }
+          } catch {
+            // Fallback to status message
+          }
+          if (res.status === 401) {
+            errMessage = 'Invalid email/username or password (401 Unauthorized).';
+          }
+          throw new LNCrawlError(errMessage, res.status);
+        }
+
+        const data = (await res.json()) as { token: string; user: LNCrawlUser };
+        if (!data?.token) {
+          throw new LNCrawlError('Authentication succeeded but server returned no token.', 500);
+        }
+        await setStoredAuthToken(data.token);
+        return data;
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        if (err?.name === 'AbortError') {
+          throw new LNCrawlError(
+            'Server timed out while waking up. Render free-tier instances can take up to 60s — please retry.',
+            408
+          );
+        }
+        if (err instanceof LNCrawlError) {
+          throw err;
+        }
+        throw new LNCrawlError(
+          err?.message || 'Network error while signing in to LNCrawl server.',
+          0
+        );
+      }
+    }
+  } finally {
+    setWakingState(false);
+  }
+}
+
+async function ensureAuthenticated(forceLogin: boolean = false): Promise<string> {
+  if (!forceLogin) {
+    const existing = await getStoredAuthToken();
+    if (existing) return existing;
+  }
+
+  if (!inFlightAuthPromise) {
+    inFlightAuthPromise = performLogin(API_EMAIL, API_PASSWORD)
+      .then((res) => res.token)
+      .finally(() => {
+        inFlightAuthPromise = null;
+      });
+  }
+
+  return inFlightAuthPromise;
+}
+
 async function apiFetch<T>(
   endpoint: string,
   options: RequestInit = {},
-  timeoutMs: number = APP_CONFIG.defaultTimeoutMs,
-  allowRetry: boolean = true
+  timeoutMs?: number,
+  isRetryAfter401: boolean = false
 ): Promise<T> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const isLoginEndpoint = endpoint.startsWith('/api/auth/login');
+  const token = isLoginEndpoint ? null : await ensureAuthenticated(false);
 
-  const token = await getStoredAuthToken();
+  const effectiveTimeout =
+    timeoutMs ?? (!hasWokenServer ? APP_CONFIG.firstRequestTimeoutMs : APP_CONFIG.defaultTimeoutMs);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
+
   const headers: Record<string, string> = {
     Accept: 'application/json',
     'Content-Type': 'application/json',
@@ -53,6 +178,10 @@ async function apiFetch<T>(
 
   const url = `${BASE_URL}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
 
+  if (!hasWokenServer) {
+    setWakingState(true);
+  }
+
   try {
     const res = await fetch(url, {
       ...options,
@@ -61,11 +190,20 @@ async function apiFetch<T>(
     });
 
     clearTimeout(timeoutId);
+    hasWokenServer = true;
+    setWakingState(false);
 
     // Handle sliding token refresh header exposed by LNCrawl server
     const refreshedToken = res.headers.get('X-Refresh-Token') || res.headers.get('x-refresh-token');
     if (refreshedToken && refreshedToken !== token) {
       await setStoredAuthToken(refreshedToken);
+    }
+
+    // On any 401, log in again once and retry that request
+    if (res.status === 401 && !isLoginEndpoint && !isRetryAfter401) {
+      await deleteStoredAuthToken();
+      await ensureAuthenticated(true);
+      return apiFetch<T>(endpoint, options, timeoutMs, true);
     }
 
     if (!res.ok) {
@@ -84,9 +222,9 @@ async function apiFetch<T>(
       }
 
       if (res.status === 401) {
-        errMessage = endpoint.startsWith('/api/auth/login')
+        errMessage = isLoginEndpoint
           ? 'Invalid username/email or password (401 Unauthorized).'
-          : 'Authentication required (401 Unauthorized). Please sign in to your LNCrawl account.';
+          : 'Authentication failed (401 Unauthorized). Please check credentials and retry.';
       }
       throw new LNCrawlError(errMessage, res.status);
     }
@@ -96,17 +234,10 @@ async function apiFetch<T>(
     return JSON.parse(text) as T;
   } catch (err: any) {
     clearTimeout(timeoutId);
-    const method = (options.method || 'GET').toUpperCase();
-    const transient = err?.name === 'AbortError' || !(err instanceof LNCrawlError);
-    // Retry once for idempotent GETs only (Render cold starts can exceed 45s).
-    // Never auto-retry POSTs such as job creation: they are not idempotent.
-    if (allowRetry && method === 'GET' && transient) {
-      await new Promise((r) => setTimeout(r, 3000));
-      return apiFetch<T>(endpoint, options, timeoutMs, false);
-    }
+    setWakingState(false);
     if (err?.name === 'AbortError') {
       throw new LNCrawlError(
-        'Request timed out. The server may be warming up from cold start.',
+        'Request timed out. The server may be waking up from cold start.',
         408
       );
     }
@@ -118,6 +249,92 @@ async function apiFetch<T>(
       0
     );
   }
+}
+
+export function stripHtmlTags(raw: string): string {
+  if (!raw) return '';
+  return raw
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?(p|div|li|h[1-6])[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function extractDomainFromUrl(rawUrl: string): string {
+  if (!rawUrl) return 'unknown';
+  try {
+    const parsed = new URL(rawUrl);
+    return parsed.hostname.replace(/^www\./i, '');
+  } catch {
+    const match = rawUrl.match(/^https?:\/\/(?:www\.)?([^/?#]+)/i);
+    return match ? match[1].toLowerCase() : 'unknown';
+  }
+}
+
+export function cleanMtlTitle(rawTitle: string): { displayTitle: string; isMtl: boolean } {
+  const trimmed = (rawTitle || '').trim();
+  const isMtl = /^mtl\s*[-_:]/i.test(trimmed);
+  const displayTitle = isMtl ? trimmed.replace(/^mtl\s*[-_:]+/i, '').trim() : trimmed;
+  return {
+    displayTitle: displayTitle || trimmed || 'Untitled Novel',
+    isMtl,
+  };
+}
+
+export function normalizeSearchTitle(rawTitle: string): string {
+  const { displayTitle } = cleanMtlTitle(rawTitle);
+  return displayTitle
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function processSearchResults(
+  rawResults: RawLNCrawlSearchResult[] | undefined | null
+): ExternalSearchResult[] {
+  if (!Array.isArray(rawResults) || rawResults.length === 0) return [];
+
+  const seenTitles = new Set<string>();
+  const seenUrls = new Set<string>();
+  const processed: ExternalSearchResult[] = [];
+
+  for (const item of rawResults) {
+    if (!item?.url || !item?.title) continue;
+    const { displayTitle, isMtl } = cleanMtlTitle(item.title);
+    const normalizedTitle = normalizeSearchTitle(item.title);
+    const normalizedUrl = item.url.trim().toLowerCase();
+    const dedupeKey = normalizedTitle || normalizedUrl;
+
+    if (seenTitles.has(dedupeKey) || seenUrls.has(normalizedUrl)) continue;
+    seenTitles.add(dedupeKey);
+    seenUrls.add(normalizedUrl);
+
+    processed.push({
+      title: item.title,
+      displayTitle,
+      isMtl,
+      url: item.url,
+      domain: extractDomainFromUrl(item.url),
+      info: typeof item.info === 'string' ? item.info.trim() : '',
+      normalizedTitle,
+    });
+  }
+
+  return processed;
+}
+
+function normalizeUrlForMatch(url: string): string {
+  return (url || '').trim().replace(/\/+$/, '').toLowerCase();
 }
 
 function parseAuthors(raw: any): string {
@@ -138,6 +355,28 @@ function resolveCoverUrl(raw: any, token: string | null): string {
     const cleanFile = String(raw.cover_file).replace(/^\/+/, '');
     return `${BASE_URL}/static/${cleanFile}?token=${encodeURIComponent(token)}`;
   }
+
+  const extra = raw?.extra || {};
+  const extraCover =
+    extra?.cover_url ||
+    extra?.cover ||
+    extra?.cover_image ||
+    extra?.thumbnail_url ||
+    extra?.thumbnail ||
+    extra?.image_url ||
+    extra?.image;
+
+  if (typeof extraCover === 'string' && extraCover.trim()) {
+    const trimmed = extraCover.trim();
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return trimmed;
+    }
+    if (token) {
+      const cleanExtra = trimmed.replace(/^\/+/, '');
+      return `${BASE_URL}/static/${cleanExtra}?token=${encodeURIComponent(token)}`;
+    }
+  }
+
   return raw?.cover_url || raw?.thumbnail_url || raw?.image_url || '';
 }
 
@@ -148,11 +387,14 @@ function mapNovel(raw: any, token: string | null): Novel {
   if (statusStr.includes('complete')) status = 'Completed';
   else if (statusStr.includes('hiatus')) status = 'Hiatus';
 
+  const rawSynopsis = raw?.synopsis || raw?.description || '';
+  const cleanSynopsis = stripHtmlTags(rawSynopsis) || 'No synopsis provided.';
+
   return {
     id: String(raw.id),
     title: raw.title || raw.name || 'Untitled Novel',
     author: parseAuthors(raw),
-    synopsis: raw.synopsis || raw.description || 'No synopsis provided.',
+    synopsis: cleanSynopsis,
     coverUrl: resolveCoverUrl(raw, token),
     genres: Array.isArray(raw.tags)
       ? raw.tags
@@ -161,7 +403,7 @@ function mapNovel(raw: any, token: string | null): Novel {
       : ['Light Novel'],
     status,
     totalChapters: raw.chapter_count ?? raw.total_chapters ?? 0,
-    sourceDomain: raw.domain || raw.source || 'LNCrawl',
+    sourceDomain: raw.domain || raw.source || extractDomainFromUrl(raw.url || '') || 'LNCrawl',
     url: raw.url,
     coverFile: raw.cover_file,
     coverAvailable: Boolean(raw.cover_available),
@@ -186,25 +428,31 @@ function mapChapter(ch: any, novelId: string, fallbackIndex: number): Chapter {
 }
 
 export const LNCrawlService = {
+  subscribeWaking(listener: (waking: boolean) => void): () => void {
+    wakingListeners.add(listener);
+    listener(isWakingServer);
+    return () => wakingListeners.delete(listener);
+  },
+
+  isServerAwake(): boolean {
+    return hasWokenServer;
+  },
+
+  /**
+   * Ensure a valid Bearer token exists using config credentials (or stored session)
+   */
+  async ensureSession(): Promise<string> {
+    return ensureAuthenticated(false);
+  },
+
   /**
    * Sign in to LNCrawl server (POST /api/auth/login)
-   * Stores the Bearer token in SecureStore (or web fallback).
    */
   async login(
     email: string,
     password: string
   ): Promise<{ token: string; user: LNCrawlUser }> {
-    const res = await apiFetch<{ token: string; user: LNCrawlUser }>(
-      '/api/auth/login',
-      {
-        method: 'POST',
-        body: JSON.stringify({ email: email.trim(), password }),
-      }
-    );
-    if (res?.token) {
-      await setStoredAuthToken(res.token);
-    }
-    return res;
+    return performLogin(email, password);
   },
 
   /**
@@ -232,20 +480,33 @@ export const LNCrawlService = {
   },
 
   /**
+   * List supported searchable sources (GET /api/sources?skip_rejected=true)
+   */
+  async getSearchableSources(): Promise<LNCrawlSourceItem[]> {
+    const sources = await apiFetch<LNCrawlSourceItem[]>('/api/sources?skip_rejected=true');
+    if (!Array.isArray(sources)) return [];
+    return sources.filter((s) => s.can_search && !s.is_disabled);
+  },
+
+  /**
    * Search novels in the LNCrawl server database (GET /api/novels)
    * Returns Paginated[Novel] -> { total, offset, limit, items }
    */
   async searchNovels(
     query: string,
     offset: number = 0,
-    limit: number = 24
+    limit: number = 24,
+    sort?: string
   ): Promise<Novel[]> {
     const params = new URLSearchParams();
     if (query.trim()) {
       params.append('search', query.trim());
     }
     params.append('offset', String(offset));
-    params.append('limit', String(limit));
+    params.append('limit', String(Math.min(100, limit)));
+    if (sort) {
+      params.append('sort', sort);
+    }
 
     const data = await apiFetch<PaginatedResponse<any> | any[]>(
       `/api/novels?${params.toString()}`
@@ -255,6 +516,64 @@ export const LNCrawlService = {
     const token = await getStoredAuthToken();
 
     return items.map((item) => mapNovel(item, token));
+  },
+
+  /**
+   * Fetch novel metadata via POST /api/job/create/fetch-novels and resolve the created Novel record.
+   */
+  async fetchAndImportNovelByUrl(
+    resultUrl: string,
+    cleanedTitle: string,
+    onStatus?: (message: string) => void
+  ): Promise<Novel> {
+    onStatus?.('Adding to library...');
+    const job = await this.createFetchNovelsJob([resultUrl], false);
+
+    const deadline = Date.now() + APP_CONFIG.searchTimeoutMs;
+    let currentJob = job;
+
+    while (!currentJob.is_done && !currentJob.error && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, APP_CONFIG.searchPollIntervalMs));
+      currentJob = await this.getJobStatus(currentJob.id);
+    }
+
+    if (currentJob.error) {
+      throw new LNCrawlError(currentJob.error, 502);
+    }
+    if (!currentJob.is_done) {
+      throw new LNCrawlError('Timed out waiting for novel details from crawler.', 408);
+    }
+
+    const targetNorm = normalizeUrlForMatch(resultUrl);
+
+    const matchByUrl = (novels: Novel[]): Novel | undefined =>
+      novels.find((n) => n.url && normalizeUrlForMatch(n.url) === targetNorm);
+
+    // 1. Search by cleaned title
+    let candidates = await this.searchNovels(cleanedTitle, 0, 20);
+    let matched = matchByUrl(candidates);
+
+    // 2. Retry once after 3 seconds if not indexed yet
+    if (!matched) {
+      await new Promise((r) => setTimeout(r, 3000));
+      candidates = await this.searchNovels(cleanedTitle, 0, 20);
+      matched = matchByUrl(candidates);
+    }
+
+    // 3. Fallback: check most recently updated novels
+    if (!matched) {
+      const recent = await this.searchNovels('', 0, 10, 'updated');
+      matched = matchByUrl(recent);
+    }
+
+    if (!matched) {
+      throw new LNCrawlError(
+        'Novel crawl finished, but the novel could not be located on the server yet. Please retry.',
+        404
+      );
+    }
+
+    return matched;
   },
 
   /**
@@ -269,7 +588,7 @@ export const LNCrawlService = {
 
   /**
    * List ALL chapters for a novel (GET /api/novel/{novel_id}/chapters)
-   * Paginates through Paginated[Chapter] until all chapters are retrieved.
+   * Paginates through Paginated[Chapter] in batches of 100 (API max) until all chapters are retrieved.
    */
   async getChapters(novelId: string, language?: string): Promise<Chapter[]> {
     const pageSize = 100;
@@ -310,8 +629,43 @@ export const LNCrawlService = {
   },
 
   /**
+   * Read chapter text content (GET /api/chapter/{chapter_id}/read)
+   */
+  async readChapter(
+    chapterId: string,
+    options: { autoFetch?: boolean; language?: string } = {}
+  ): Promise<{
+    title: string;
+    content: string | null;
+    wordCount?: number | null;
+    nextId?: string | null;
+    previousId?: string | null;
+    job?: LNCrawlJob | null;
+  }> {
+    const { autoFetch = false, language } = options;
+    const params = new URLSearchParams();
+    if (autoFetch) params.append('auto_fetch', 'true');
+    if (language) params.append('language', language);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+
+    const raw = await apiFetch<any>(`/api/chapter/${encodeURIComponent(chapterId)}/read${qs}`);
+
+    if (typeof raw === 'string') {
+      return { title: 'Chapter', content: raw };
+    }
+
+    return {
+      title: raw?.chapter?.title || raw?.title || 'Chapter Content',
+      content: typeof raw?.content === 'string' && raw.content.trim().length > 0 ? raw.content : null,
+      wordCount: raw?.word_count ?? null,
+      nextId: raw?.next_id ?? null,
+      previousId: raw?.previous_id ?? null,
+      job: raw?.job ?? null,
+    };
+  },
+
+  /**
    * Fetch chapter text content for reading or downloading (GET /api/chapter/{chapter_id}/read)
-   * Parses ReadChapterResponse: { novel, chapter, job, content, next_id, previous_id, word_count }
    * If content is not cached on server yet, triggers auto_fetch and polls the returned job.
    */
   async fetchChapterContent(
@@ -325,29 +679,17 @@ export const LNCrawlService = {
     previousId?: string | null;
   }> {
     const { autoFetch = true, language } = options;
-    const params = new URLSearchParams();
-    if (autoFetch) params.append('auto_fetch', 'true');
-    if (language) params.append('language', language);
-    const qs = params.toString() ? `?${params.toString()}` : '';
+    let first = await this.readChapter(chapterId, { autoFetch, language });
 
-    let raw = await apiFetch<any>(`/api/chapter/${encodeURIComponent(chapterId)}/read${qs}`);
-
-    if (typeof raw === 'string') {
-      return { title: 'Chapter', content: raw };
-    }
-
-    // If chapter content is not crawled yet, wait on the auto-created job and re-read
-    if (!raw?.content && raw?.job?.id) {
-      const completedJob = await this.waitForJob(raw.job.id, 45000);
+    if (!first.content && first.job?.id) {
+      const completedJob = await this.waitForJob(first.job.id, 45000);
       if (completedJob.error) {
         throw new LNCrawlError(`Failed to crawl chapter: ${completedJob.error}`, 502);
       }
-      raw = await apiFetch<any>(
-        `/api/chapter/${encodeURIComponent(chapterId)}/read${language ? `?language=${encodeURIComponent(language)}` : ''}`
-      );
+      first = await this.readChapter(chapterId, { autoFetch: false, language });
     }
 
-    if (!raw?.content) {
+    if (!first.content) {
       throw new LNCrawlError(
         'Chapter content is not available on the server yet. Try fetching the chapter again.',
         404
@@ -355,11 +697,11 @@ export const LNCrawlService = {
     }
 
     return {
-      title: raw?.chapter?.title || raw?.title || 'Chapter Content',
-      content: raw.content,
-      wordCount: raw.word_count ?? null,
-      nextId: raw.next_id ?? null,
-      previousId: raw.previous_id ?? null,
+      title: first.title,
+      content: first.content,
+      wordCount: first.wordCount ?? null,
+      nextId: first.nextId ?? null,
+      previousId: first.previousId ?? null,
     };
   },
 
@@ -368,9 +710,14 @@ export const LNCrawlService = {
   // ==========================================
 
   async createSearchSourcesJob(query: string, domain?: string): Promise<LNCrawlJob> {
+    const trimmed = query.trim();
+    if (trimmed.length < 2) {
+      throw new LNCrawlError('Search query must be at least 2 characters.', 422);
+    }
+    const capped = trimmed.slice(0, 50);
     return apiFetch<LNCrawlJob>('/api/job/create/search-sources', {
       method: 'POST',
-      body: JSON.stringify({ query: query.trim(), ...(domain ? { domain } : {}) }),
+      body: JSON.stringify({ query: capped, ...(domain ? { domain } : {}) }),
     });
   },
 
@@ -380,126 +727,6 @@ export const LNCrawlService = {
       body: JSON.stringify({ urls, full }),
     });
   },
-
-  /**
-   * Full external-source search pipeline for a genuine local-database miss:
-   * 1. Create a SEARCH_ALL_SOURCES job (POST /api/job/create/search-sources without domain).
-   * 2. Poll it (JobStatus: 0 pending, 1 running, 2 success, 3 failed, 4 canceled, 5 paused).
-   * 3. On success, read `extra.search_results` (the server also spawns NOVEL_BATCH
-   *    children to fetch metadata for the matched URLs).
-   * 4. If metadata is not yet in the database, create a fetch-novels job for the URLs,
-   *    poll it, then let the caller re-query /api/novels.
-   * Does NOT retry job creation on timeout/network error (non-idempotent POSTs).
-   */
-  async externalSearch(
-    query: string,
-    hooks: {
-      onPhase: (phase: 'searching' | 'fetching', detail: string) => void;
-    } = { onPhase: () => {} }
-  ): Promise<
-    | { outcome: 'results' }
-    | { outcome: 'no_results' }
-    | { outcome: 'failed'; reason: string }
-    | { outcome: 'canceled' }
-    | { outcome: 'timeout' }
-  > {
-    const trimmed = query.trim();
-    if (trimmed.length < 2 || trimmed.length > 50) {
-      return { outcome: 'failed', reason: 'Search query must be 2-50 characters.' };
-    }
-
-    let searchJob: LNCrawlJob;
-    try {
-      searchJob = await this.createSearchSourcesJob(trimmed);
-    } catch (err: any) {
-      return {
-        outcome: 'failed',
-        reason: err?.message || 'Could not start the external search job.',
-      };
-    }
-
-    hooks.onPhase('searching', 'Searching external sources...');
-    const finishedSearch = await this.pollJobUntilDone(searchJob.id, 180000);
-    if (finishedSearch.outcome !== 'done') {
-      return finishedSearch as
-        | { outcome: 'failed'; reason: string }
-        | { outcome: 'canceled' }
-        | { outcome: 'timeout' };
-    }
-
-    const searchResults: LNCrawlSearchResult[] =
-      finishedSearch.job?.extra?.search_results || [];
-    if (!Array.isArray(searchResults) || searchResults.length === 0) {
-      return { outcome: 'no_results' };
-    }
-
-    // The server auto-creates NOVEL_BATCH children that fetch metadata for the
-    // matched URLs. Give the database a moment, then check whether the novels
-    // are queryable; if not, explicitly run fetch-novels (idempotent on the
-    // server side for already-known novels, safe to call with matched URLs).
-    hooks.onPhase('fetching', 'Fetching novel details from sources...');
-    await new Promise((r) => setTimeout(r, 5000));
-
-    const urls = searchResults.map((r) => r.url).filter(Boolean);
-    let fetchJob: LNCrawlJob | null = null;
-    try {
-      fetchJob = await this.createFetchNovelsJob(urls, false);
-    } catch (err: any) {
-      return { outcome: 'failed', reason: err?.message || 'Could not start the fetch job.' };
-    }
-
-    hooks.onPhase('fetching', 'Downloading novel information...');
-    const finishedFetch = await this.pollJobUntilDone(fetchJob.id, 240000);
-    if (finishedFetch.outcome !== 'done') {
-      return finishedFetch as
-        | { outcome: 'failed'; reason: string }
-        | { outcome: 'canceled' }
-        | { outcome: 'timeout' };
-    }
-
-    return { outcome: 'results' };
-  },
-
-  /**
-   * Poll GET /api/job/{id} using the real Job schema. GETs are idempotent and
-   * already benefit from the cold-start retry in apiFetch.
-   */
-  async pollJobUntilDone(
-    jobId: string,
-    timeoutMs: number = 120000
-  ): Promise<
-    | { outcome: 'done'; job: LNCrawlJob }
-    | { outcome: 'failed'; reason: string }
-    | { outcome: 'canceled' }
-    | { outcome: 'timeout' }
-  > {
-    const start = Date.now();
-    const pollIntervalMs = 4000;
-    while (Date.now() - start < timeoutMs) {
-      let job: LNCrawlJob;
-      try {
-        job = await this.getJobStatus(jobId);
-      } catch (err: any) {
-        return { outcome: 'failed', reason: err?.message || 'Lost contact with the server while polling the job.' };
-      }
-      if (job.is_done) {
-        // JobStatus: SUCCESS=2, FAILED=3, CANCELED=4
-        if (job.status === 4 || /cancel/i.test(job.error || '')) {
-          return { outcome: 'canceled' };
-        }
-        if (job.status === 3) {
-          return { outcome: 'failed', reason: job.error || 'The crawl job failed on the server.' };
-        }
-        if (job.error) {
-          return { outcome: 'failed', reason: job.error };
-        }
-        return { outcome: 'done', job };
-      }
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
-    }
-    return { outcome: 'timeout' };
-  },
-
 
   async createFetchChaptersJob(chapterIds: string[]): Promise<LNCrawlJob> {
     return apiFetch<LNCrawlJob>('/api/job/create/fetch-chapters', {
@@ -555,7 +782,7 @@ export const LNCrawlService = {
       if (job.is_done || job.error) {
         return job;
       }
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, APP_CONFIG.searchPollIntervalMs));
     }
     throw new LNCrawlError('Background crawl job timed out while waiting for completion.', 408);
   },
@@ -589,45 +816,31 @@ export const LNCrawlService = {
   },
 
   /**
-   * Test backend API reachability (/openapi.json) and auth status (/api/auth/me)
+   * Ensure auth session & test backend API reachability (/api/auth/me)
+   * Uses 60s cold-start timeout on the very first request.
    */
   async testConnection(): Promise<{
     online: boolean;
     authenticated: boolean;
     latencyMs: number;
     user?: LNCrawlUser;
+    error?: string;
   }> {
     const start = Date.now();
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), APP_CONFIG.defaultTimeoutMs);
-      const res = await fetch(`${BASE_URL}/openapi.json`, {
-        method: 'GET',
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+      await ensureAuthenticated(false);
+      const user = await this.getMe();
       const latencyMs = Date.now() - start;
-
-      if (!res.ok) {
-        return { online: false, authenticated: false, latencyMs };
-      }
-
-      const token = await getStoredAuthToken();
-      if (!token) {
-        return { online: true, authenticated: false, latencyMs };
-      }
-
-      try {
-        const user = await this.getMe();
-        return { online: true, authenticated: true, latencyMs, user };
-      } catch {
-        return { online: true, authenticated: false, latencyMs };
-      }
-    } catch {
+      return { online: true, authenticated: true, latencyMs, user };
+    } catch (err: any) {
+      const latencyMs = Date.now() - start;
+      const status = err?.status ?? 0;
+      const online = status > 0 && status !== 408;
       return {
-        online: false,
+        online,
         authenticated: false,
-        latencyMs: 0,
+        latencyMs,
+        error: err?.message || 'Unable to connect to LNCrawl server.',
       };
     }
   },

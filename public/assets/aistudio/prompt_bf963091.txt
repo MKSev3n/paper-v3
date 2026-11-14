@@ -1,0 +1,45 @@
+You are updating my existing native Android app "Paper", a light novel reader built with Expo SDK 52, React Native 0.76.9, Expo Router 4 and TypeScript. Do NOT write web code: no DOM elements, react-dom, Vite or Tailwind web classes. Use only React Native components and StyleSheet.
+
+LOCKED VERSIONS (do not change or add packages): expo ~52.0.37, expo-router ~4.0.17, react 18.3.1, react-native 0.76.9, expo-sqlite ~15.1.4, expo-file-system ~18.0.11, expo-sharing ~13.0.1, expo-linking ~7.0.5, expo-font ~13.0.4, expo-constants ~17.0.7, expo-status-bar ~2.0.1, @react-native-async-storage/async-storage 1.23.1, react-native-safe-area-context 4.12.0, react-native-screens ~4.4.0, @expo/vector-icons ~14.0.4, query-string 7.1.3. Do not add newArchEnabled or predictiveBackGestureEnabled to app.json. If a new package is truly needed, name it and say why.
+
+KEEP EVERYTHING THAT ALREADY WORKS: bottom tabs (Library, Search, Storage), the library grid with Offline badges, the novel details screen with the download panel (Download All / Next 10 / Next 25, progress, pause, resume, cancel), the offline-first reader with exact scroll memory, themes (dark, sepia, light), font size, line spacing and typefaces, SQLite chapter storage, EPUB export, and the dark design. Only change what is listed below.
+
+SERVER: an lncrawl FastAPI server. Put these in src/config.ts, the only place to edit them: API_URL = "https://lightnovel-crawler-vit0.onrender.com", API_EMAIL = "admin", API_PASSWORD = "admin". All /api endpoints are protected.
+
+FIX 1 - AUTHENTICATION (the server returns "Unauthorized"):
+- Before the first request, call POST {API_URL}/api/auth/login with JSON {email, password}. The response has a "token" field. Store it in AsyncStorage.
+- Send "Authorization: Bearer <token>" on every request.
+- On any 401, log in again once and retry that request. If login fails, show a clear error banner with a Retry button.
+- The server is on Render's free tier and may take 30 to 60 seconds to wake. Use a 60 second timeout on the first request and show "Waking up server..." while waiting.
+- The Search screen status banner must show a readable server URL and a green or red dot.
+
+FIX 2 - LIVE SEARCH (the app currently calls GET /api/novels?search=, which only searches novels already on the server). Replace it with the server's live search job:
+1. Start: POST /api/job/create/search-sources with JSON {"query": "<text>"}. The query must be 2 to 50 characters. An optional "domain" limits the search to one source. The response is a Job object with an "id".
+2. Poll: GET /api/job/{id} every 2 seconds. Results appear progressively in job.extra.search_results as a list of {title, url, info}, where info is "ongoing" or "completed". The job has is_done (boolean), progress (0 to 100), done, total and error. A search across all sources can take a minute or more.
+3. Show results as they arrive and keep polling until is_done is true, 120 seconds pass, or error is set. Show a thin progress bar from job.progress below the input. Stop polling when the screen unmounts or a new search starts, and cancel the old job with POST /api/job/{id}/cancel.
+4. Clean the results: many titles start with "MTL-" (machine translation). Strip that prefix for display and show a small "MTL" badge instead. Dedupe by normalized title (lowercase, no punctuation, no "MTL-"), keeping the first result's url. Show the source domain taken from the url on each card, plus the info status as a small tag. There are no covers or authors in search results, so use a placeholder cover.
+5. A search for "madame" must show every novel whose title contains "madame".
+6. Trigger a search from the submit button, the keyboard's search key, or a 700 ms debounce after typing stops, with a minimum of 2 characters. Genre pills run the same search with the genre as the query.
+7. UI states: spinner and progress while searching, an empty state, and an error state with Retry.
+
+OPENING A SEARCH RESULT (add it to the library):
+1. Start POST /api/job/create/fetch-novels with JSON {"urls": ["<result url>"], "full": false}. The response is a Job. Poll GET /api/job/{id} every 2 seconds until is_done is true. Show "Adding to library..." and navigate on success, or show job.error with Retry.
+2. After the job finishes, find the new novel: call GET /api/novels?search=<cleaned title>&limit=20 and pick the item whose "url" field equals the result url. If none matches, retry once after 3 seconds, then try GET /api/novels?sort=updated&limit=10 and match by url again. A Novel has id, title, url, domain, authors and extra, and there may be cover info inside "extra". Inspect it and use it for the cover if present.
+3. Open the existing novel details screen with that novel id.
+
+DOWNLOADING CHAPTERS:
+- List chapters with GET /api/novel/{novel_id}/chapters?limit=100&offset=N and page until all are loaded (the limit cannot exceed 100).
+- To download chapters, start POST /api/job/create/fetch-chapters and poll the job. The request body is probably {"chapters": ["<chapter id>", ...]}. Check the real schema at {API_URL}/openapi.json under components.schemas.FetchChaptersRequest and use the real field name. Send chapters in batches of 10 to 25 and update the app's existing progress, pause and cancel logic from the job's done and total.
+- After the job is done, read each chapter's text with GET /api/chapter/{chapter_id}/read and save it to the existing local SQLite store, so reading works offline.
+- Show a per-chapter failure state and keep the other chapters going.
+
+FIX 3 - KEYBOARD CLOSES AFTER EVERY LETTER (the search TextInput remounts on every state change):
+- Never define components inside another component's render. Move SearchBar and the result card to the top level of the file.
+- Do not swap the whole screen for a loading view while searching. The TextInput must stay mounted at all times.
+- If the input is in a FlatList header, pass ListHeaderComponent as an element, not an inline function.
+- Keep the input value in useState, use keyboardShouldPersistTaps="handled", and use stable keys on list items.
+
+OUTPUT FORMAT:
+- Give me every changed or new file in full, each under its path (for example src/services/api.ts, app/(tabs)/search.tsx). Do not use "..." or "rest of the code unchanged".
+- Do not output package.json, app.json or eas.json unless a change is required, and then show only the changed lines.
+- End with a short checklist of what I must configure and any new package, if any.

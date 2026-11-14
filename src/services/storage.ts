@@ -2,18 +2,19 @@
  * Storage Service
  * - Authentication tokens are stored in expo-secure-store (Android Keystore / EncryptedSharedPreferences
  *   and iOS Keychain), with safe one-time migration from legacy AsyncStorage.
- * - Non-sensitive reader preferences and last-read ID remain in AsyncStorage.
+ * - Non-sensitive reader preferences, selected discover providers, and last-read ID remain in AsyncStorage.
  */
 
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
-import { ReaderSettings } from '../types';
+import { ReaderSettings, SearchProviderId } from '../types';
 
 const KEYS = {
   READER_SETTINGS: '@paper_reader_settings',
   LEGACY_AUTH_TOKEN: '@paper_lncrawl_token',
   LAST_READ_NOVEL_ID: '@paper_last_read_novel_id',
+  DISCOVER_PROVIDERS: '@paper_discover_providers',
 };
 
 // SecureStore keys allow only alphanumeric characters, '.', '-', and '_'
@@ -27,6 +28,19 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   lineSpacing: 1.8,
   fontFamily: 'serif',
 };
+
+export const DEFAULT_DISCOVER_PROVIDERS: SearchProviderId[] = [
+  'readnovelfull',
+  'novelfull',
+  'novelbin',
+];
+
+const VALID_PROVIDER_IDS = new Set<SearchProviderId>([
+  'readnovelfull',
+  'novelfull',
+  'novelbin',
+  'lncrawl',
+]);
 
 let migrationPromise: Promise<void> | null = null;
 
@@ -78,6 +92,35 @@ export async function saveReaderSettings(settings: ReaderSettings): Promise<void
     await AsyncStorage.setItem(KEYS.READER_SETTINGS, JSON.stringify(settings));
   } catch {
     console.warn('Failed to save reader settings.');
+  }
+}
+
+export async function getDiscoverProviders(): Promise<SearchProviderId[]> {
+  try {
+    const raw = await AsyncStorage.getItem(KEYS.DISCOVER_PROVIDERS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const filtered = parsed.filter((id): id is SearchProviderId =>
+          VALID_PROVIDER_IDS.has(id)
+        );
+        if (filtered.length > 0) {
+          return filtered;
+        }
+      }
+    }
+  } catch {
+    console.warn('Failed to load selected search providers.');
+  }
+  return [...DEFAULT_DISCOVER_PROVIDERS];
+}
+
+export async function saveDiscoverProviders(providers: SearchProviderId[]): Promise<void> {
+  try {
+    const sanitized = providers.filter((id) => VALID_PROVIDER_IDS.has(id));
+    await AsyncStorage.setItem(KEYS.DISCOVER_PROVIDERS, JSON.stringify(sanitized));
+  } catch {
+    console.warn('Failed to save selected search providers.');
   }
 }
 

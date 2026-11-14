@@ -4,6 +4,8 @@
 
 import { ReaderThemeMode } from '../theme/colors';
 
+export type SearchProviderId = 'readnovelfull' | 'novelfull' | 'novelbin' | 'lncrawl';
+
 export interface Novel {
   id: string;
   title: string;
@@ -16,6 +18,8 @@ export interface Novel {
   totalChapters: number;
   downloadedChaptersCount?: number;
   isDownloaded?: boolean;
+  provider?: string;
+  path?: string;
   sourceDomain?: string;
   url?: string;
   coverFile?: string;
@@ -32,6 +36,8 @@ export interface Chapter {
   isDownloaded?: boolean;
   isDone?: boolean;
   isAvailable?: boolean;
+  provider?: string;
+  path?: string;
   url?: string;
   wordsCount?: number;
   releaseDate?: string;
@@ -69,6 +75,9 @@ export interface DownloadTask {
   novelId: string;
   totalChapters: number;
   completedChapters: number;
+  failedChapters?: number;
+  failedChapterIds?: string[];
+  chapterErrors?: Record<string, string>;
   currentChapterTitle: string;
   status: DownloadStatus;
   error?: string;
@@ -99,10 +108,45 @@ export interface LNCrawlUser {
   is_verified: boolean;
 }
 
+export interface RawLNCrawlSearchResult {
+  title: string;
+  url: string;
+  info?: string;
+}
+
+export interface ExternalSearchResult {
+  title: string;
+  displayTitle: string;
+  isMtl: boolean;
+  url: string;
+  domain: string;
+  info: string;
+  normalizedTitle: string;
+}
+
+export interface LNCrawlSourceItem {
+  version: number;
+  md5: string;
+  file_path: string;
+  language: string;
+  has_manga: boolean;
+  can_login: boolean;
+  can_search: boolean;
+  has_mtl: boolean;
+  request_rate_limit: number;
+  url: string;
+  domain: string;
+  crawler_id: string;
+  total_novels: number;
+  is_disabled: boolean;
+  disable_reason?: string | null;
+}
+
 export interface LNCrawlJob {
   id: string;
   user_id: string;
   type: number;
+  domain?: string | null;
   status: number;
   is_done: boolean;
   is_running: number;
@@ -113,7 +157,12 @@ export interface LNCrawlJob {
   total: number;
   error?: string | null;
   job_title: string;
-  extra?: Record<string, any>;
+  extra?: {
+    search_results?: RawLNCrawlSearchResult[];
+    query?: string;
+    url?: string;
+    [key: string]: any;
+  };
 }
 
 export interface LNCrawlSearchResult {

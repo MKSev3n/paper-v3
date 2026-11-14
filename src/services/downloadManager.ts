@@ -1,14 +1,16 @@
 /**
  * LNReader-Style Offline Download Manager for Paper
- * Handles batch novel downloads, selected chapter downloads, pause/cancel,
- * and EPUB export via expo-sharing.
+ * Supports both serverless local sources (concurrency 2, 400ms spacing, 2 retries)
+ * and LNCrawl server fetch-chapters jobs (batches of 15), persisting all chapters in SQLite.
  */
 
 import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { Novel, Chapter, DownloadTask } from '../types';
+import { APP_CONFIG } from '../config';
 import { LNCrawlService } from './lncrawl';
+import { getSource, Source } from '../sources';
 import {
   upsertNovel,
   saveChapter,
@@ -20,10 +22,22 @@ import { downloadCoverImage } from './fileStorage';
 
 type ProgressListener = (task: DownloadTask) => void;
 
+const CHAPTER_BATCH_SIZE = 15; // Within 10-25 chapters per LNCrawl fetch-chapters job
+const BATCH_JOB_TIMEOUT_MS = 120000;
+const LOCAL_CONCURRENCY = 2;
+const LOCAL_REQUEST_DELAY_MS = 400;
+const LOCAL_MAX_RETRIES = 2;
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
 class DownloadManagerService {
   private activeTasks: Map<string, DownloadTask> = new Map();
   private cancelFlags: Map<string, boolean> = new Map();
   private pauseFlags: Map<string, boolean> = new Map();
+  private activeRemoteJobs: Map<string, string> = new Map();
+  private chapterFailuresByNovel: Map<string, Record<string, string>> = new Map();
   private listeners: Set<ProgressListener> = new Set();
 
   subscribe(listener: ProgressListener): () => void {
@@ -32,21 +46,175 @@ class DownloadManagerService {
   }
 
   private notify(task: DownloadTask) {
-    this.activeTasks.set(task.novelId, task);
-    this.listeners.forEach((fn) => fn(task));
+    const snapshot: DownloadTask = {
+      ...task,
+      failedChapterIds: task.failedChapterIds ? [...task.failedChapterIds] : [],
+      chapterErrors: task.chapterErrors ? { ...task.chapterErrors } : {},
+    };
+    this.activeTasks.set(task.novelId, snapshot);
+    this.listeners.forEach((fn) => fn(snapshot));
   }
 
   getTask(novelId: string): DownloadTask | undefined {
     return this.activeTasks.get(novelId);
   }
 
+  getChapterErrors(novelId: string): Record<string, string> {
+    return { ...(this.chapterFailuresByNovel.get(novelId) || {}) };
+  }
+
+  clearChapterError(novelId: string, chapterId: string) {
+    const map = this.chapterFailuresByNovel.get(novelId);
+    if (map && map[chapterId]) {
+      delete map[chapterId];
+    }
+  }
+
+  private async waitIfPaused(novelId: string, task: DownloadTask): Promise<'ok' | 'cancelled'> {
+    if (this.cancelFlags.get(novelId)) {
+      return 'cancelled';
+    }
+    while (this.pauseFlags.get(novelId)) {
+      this.notify({
+        ...task,
+        status: 'paused',
+        currentChapterTitle: 'Download paused',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      if (this.cancelFlags.get(novelId)) {
+        return 'cancelled';
+      }
+    }
+    return 'ok';
+  }
+
+  private async fetchLocalChapterWithRetries(
+    source: Source,
+    chapterPath: string,
+    novelId?: string
+  ): Promise<string> {
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt <= LOCAL_MAX_RETRIES; attempt++) {
+      if (novelId && this.cancelFlags.get(novelId)) {
+        throw new Error('Download cancelled');
+      }
+      try {
+        const text = await source.getChapter(chapterPath);
+        if (!text || text.trim().length === 0) {
+          throw new Error('Chapter content was empty.');
+        }
+        return text;
+      } catch (err: any) {
+        lastError = err instanceof Error ? err : new Error(String(err || 'Chapter fetch failed'));
+        if (attempt < LOCAL_MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, LOCAL_REQUEST_DELAY_MS * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError || new Error('Failed to fetch chapter from source.');
+  }
+
+  private async downloadWithLocalSource(
+    novel: Novel,
+    source: Source,
+    pendingChapters: Chapter[],
+    task: DownloadTask,
+    initialCompleted: number,
+    existingErrors: Record<string, string>
+  ): Promise<{ completed: number; failedIds: string[]; cancelled: boolean }> {
+    const novelId = novel.id;
+    let completed = initialCompleted;
+    const failedIds: string[] = [];
+    let nextIndex = 0;
+    let cancelled = false;
+
+    // Rate-limit gate ensuring at least 400ms between request starts across both concurrent workers
+    let lastDispatchAt = 0;
+    let gateChain: Promise<void> = Promise.resolve();
+
+    const waitForRateLimitSlot = async () => {
+      const current = gateChain.then(async () => {
+        const elapsed = Date.now() - lastDispatchAt;
+        if (elapsed < LOCAL_REQUEST_DELAY_MS) {
+          await new Promise((r) => setTimeout(r, LOCAL_REQUEST_DELAY_MS - elapsed));
+        }
+        lastDispatchAt = Date.now();
+      });
+      gateChain = current.catch(() => {});
+      await current;
+    };
+
+    const worker = async () => {
+      while (true) {
+        if ((await this.waitIfPaused(novelId, task)) === 'cancelled') {
+          cancelled = true;
+          return;
+        }
+
+        const idx = nextIndex++;
+        if (idx >= pendingChapters.length) {
+          return;
+        }
+
+        const chapter = pendingChapters[idx];
+        const chapterPath = chapter.path || chapter.url;
+
+        task.status = 'downloading';
+        task.currentChapterTitle = chapter.title || `Chapter ${chapter.serial}`;
+        this.notify(task);
+
+        await waitForRateLimitSlot();
+
+        if ((await this.waitIfPaused(novelId, task)) === 'cancelled') {
+          cancelled = true;
+          return;
+        }
+
+        try {
+          if (!chapterPath) {
+            throw new Error('Chapter path is missing.');
+          }
+          const content = await this.fetchLocalChapterWithRetries(source, chapterPath, novelId);
+          await saveChapter({
+            ...chapter,
+            provider: source.id,
+            path: chapterPath,
+            content,
+            wordsCount: countWords(content),
+            isDownloaded: true,
+          });
+          delete existingErrors[chapter.id];
+          completed++;
+        } catch (chErr: any) {
+          if (this.cancelFlags.get(novelId)) {
+            cancelled = true;
+            return;
+          }
+          const msg = chErr?.message || 'Failed to save chapter';
+          console.warn(`Failed downloading local chapter ${chapter.id}:`, chErr);
+          failedIds.push(chapter.id);
+          existingErrors[chapter.id] = msg;
+        }
+
+        this.chapterFailuresByNovel.set(novelId, { ...existingErrors });
+        task.completedChapters = completed;
+        task.failedChapters = failedIds.length;
+        task.failedChapterIds = [...failedIds];
+        task.chapterErrors = { ...existingErrors };
+        this.notify(task);
+      }
+    };
+
+    const workerCount = Math.min(LOCAL_CONCURRENCY, pendingChapters.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    return { completed, failedIds, cancelled };
+  }
+
   /**
    * Download a batch of chapters for a novel (or the entire novel)
    */
-  async startDownload(
-    novel: Novel,
-    chaptersToDownload: Chapter[]
-  ): Promise<void> {
+  async startDownload(novel: Novel, chaptersToDownload: Chapter[]): Promise<void> {
     const novelId = novel.id;
 
     if (this.activeTasks.get(novelId)?.status === 'downloading') {
@@ -56,7 +224,7 @@ class DownloadManagerService {
     this.cancelFlags.set(novelId, false);
     this.pauseFlags.set(novelId, false);
 
-    // 1. Ensure novel record exists in SQLite
+    // 1. Ensure novel record exists in SQLite (without prematurely marking isDownloaded: true)
     let localCover = novel.localCoverPath;
     if (!localCover && novel.coverUrl) {
       localCover = await downloadCoverImage(novel.id, novel.coverUrl);
@@ -64,74 +232,299 @@ class DownloadManagerService {
 
     await upsertNovel({
       ...novel,
+      provider: novel.provider || 'lncrawl',
       localCoverPath: localCover,
-      isDownloaded: true,
+      isDownloaded: Boolean(novel.isDownloaded),
     });
 
+    const existingErrors = { ...(this.chapterFailuresByNovel.get(novelId) || {}) };
     const task: DownloadTask = {
       novelId,
       totalChapters: chaptersToDownload.length,
       completedChapters: 0,
-      currentChapterTitle: 'Starting download...',
+      failedChapters: 0,
+      failedChapterIds: [],
+      chapterErrors: existingErrors,
+      currentChapterTitle: 'Checking local chapters...',
       status: 'downloading',
     };
     this.notify(task);
 
     let completed = 0;
-    let lastError: string | undefined;
+    const pendingChapters: Chapter[] = [];
 
-    for (let i = 0; i < chaptersToDownload.length; i++) {
-      // Check cancellation
+    for (const ch of chaptersToDownload) {
       if (this.cancelFlags.get(novelId)) {
-        this.notify({
-          ...task,
-          status: 'idle',
-          currentChapterTitle: 'Download cancelled',
-        });
+        this.notify({ ...task, status: 'idle', currentChapterTitle: 'Download cancelled' });
         return;
       }
+      const existing = await getChapterById(ch.id);
+      if (existing?.isDownloaded && existing.content && existing.content.trim().length > 0) {
+        completed++;
+        delete existingErrors[ch.id];
+      } else {
+        pendingChapters.push(ch);
+      }
+    }
 
-      // Check pause
-      while (this.pauseFlags.get(novelId)) {
+    task.completedChapters = completed;
+    this.chapterFailuresByNovel.set(novelId, existingErrors);
+    this.notify(task);
+
+    if (pendingChapters.length === 0) {
+      this.notify({
+        ...task,
+        completedChapters: completed,
+        currentChapterTitle: 'All chapters already downloaded!',
+        status: 'completed',
+      });
+      setTimeout(() => {
+        this.activeTasks.delete(novelId);
         this.notify({
           ...task,
-          status: 'paused',
-          currentChapterTitle: 'Download paused',
+          completedChapters: completed,
+          currentChapterTitle: '',
+          status: 'idle',
         });
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        if (this.cancelFlags.get(novelId)) {
-          this.notify({
-            ...task,
-            status: 'idle',
-            currentChapterTitle: 'Download cancelled',
-          });
-          return;
-        }
+      }, 2500);
+      return;
+    }
+
+    let failedIds: string[] = [];
+    const localSource = getSource(novel.provider);
+
+    if (localSource) {
+      const outcome = await this.downloadWithLocalSource(
+        novel,
+        localSource,
+        pendingChapters,
+        task,
+        completed,
+        existingErrors
+      );
+      completed = outcome.completed;
+      failedIds = outcome.failedIds;
+
+      if (outcome.cancelled) {
+        this.notify({ ...task, status: 'idle', currentChapterTitle: 'Download cancelled' });
+        return;
+      }
+    } else {
+      // LNCrawl server fetch-chapters flow
+      const batches: Chapter[][] = [];
+      for (let i = 0; i < pendingChapters.length; i += CHAPTER_BATCH_SIZE) {
+        batches.push(pendingChapters.slice(i, i + CHAPTER_BATCH_SIZE));
       }
 
-      const chapter = chaptersToDownload[i];
+      for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+        const batch = batches[batchIdx];
 
-      task.currentChapterTitle = chapter.title || `Chapter ${chapter.serial}`;
-      task.completedChapters = completed;
-      task.status = 'downloading';
-      this.notify(task);
-
-      try {
-        // Avoid duplicate network download if chapter is already saved locally
-        const existing = await getChapterById(chapter.id);
-        if (existing?.isDownloaded && existing.content && existing.content.trim().length > 0) {
-          completed++;
-          task.completedChapters = completed;
-          this.notify(task);
-          continue;
+        if ((await this.waitIfPaused(novelId, task)) === 'cancelled') {
+          this.notify({ ...task, status: 'idle', currentChapterTitle: 'Download cancelled' });
+          return;
         }
 
-        // Fetch chapter body from LNCrawl if not already present
-        let content = chapter.content;
-        let fetchedTitle = chapter.title;
-        let fetchedWordCount = chapter.wordsCount;
+        const batchLabel =
+          batches.length > 1 ? `Batch ${batchIdx + 1}/${batches.length}` : 'Chapters';
+        task.status = 'downloading';
+        task.currentChapterTitle = `Queueing ${batchLabel} (${batch.length} chapters)...`;
+        this.notify(task);
 
-        if (!content) {
+        let batchErrorMsg: string | null = null;
+
+        try {
+          const job = await LNCrawlService.createFetchChaptersJob(batch.map((c) => c.id));
+          this.activeRemoteJobs.set(novelId, job.id);
+
+          let currentJob = job;
+          const deadline = Date.now() + BATCH_JOB_TIMEOUT_MS;
+
+          while (!currentJob.is_done && !currentJob.error && Date.now() < deadline) {
+            if ((await this.waitIfPaused(novelId, task)) === 'cancelled') {
+              this.activeRemoteJobs.delete(novelId);
+              LNCrawlService.cancelJob(job.id).catch(() => {});
+              this.notify({ ...task, status: 'idle', currentChapterTitle: 'Download cancelled' });
+              return;
+            }
+
+            await new Promise((resolve) =>
+              setTimeout(resolve, APP_CONFIG.searchPollIntervalMs)
+            );
+
+            if ((await this.waitIfPaused(novelId, task)) === 'cancelled') {
+              this.activeRemoteJobs.delete(novelId);
+              LNCrawlService.cancelJob(job.id).catch(() => {});
+              this.notify({ ...task, status: 'idle', currentChapterTitle: 'Download cancelled' });
+              return;
+            }
+
+            currentJob = await LNCrawlService.getJobStatus(job.id);
+            const jobTotal = currentJob.total || batch.length;
+            const jobDone = Math.min(jobTotal, currentJob.done || 0);
+            task.status = 'downloading';
+            task.currentChapterTitle = `Crawling ${batchLabel}: ${jobDone}/${jobTotal} on server`;
+            this.notify(task);
+          }
+
+          this.activeRemoteJobs.delete(novelId);
+
+          if (currentJob.error) {
+            batchErrorMsg = currentJob.error;
+          } else if (!currentJob.is_done) {
+            batchErrorMsg = 'Server fetch-chapters job timed out.';
+          }
+        } catch (jobErr: any) {
+          this.activeRemoteJobs.delete(novelId);
+          batchErrorMsg = jobErr?.message || 'Failed to start fetch-chapters job.';
+        }
+
+        for (const chapter of batch) {
+          if ((await this.waitIfPaused(novelId, task)) === 'cancelled') {
+            this.notify({ ...task, status: 'idle', currentChapterTitle: 'Download cancelled' });
+            return;
+          }
+
+          task.status = 'downloading';
+          task.currentChapterTitle = chapter.title || `Chapter ${chapter.serial}`;
+          this.notify(task);
+
+          try {
+            let fetchedTitle = chapter.title;
+            let fetchedWordCount = chapter.wordsCount;
+            let content: string | null = null;
+
+            const readRes = await LNCrawlService.readChapter(chapter.id, {
+              autoFetch: false,
+            });
+            content = readRes.content;
+            if (readRes.title && readRes.title !== 'Chapter Content') {
+              fetchedTitle = readRes.title;
+            }
+            if (typeof readRes.wordCount === 'number') {
+              fetchedWordCount = readRes.wordCount;
+            }
+
+            if (!content && batchErrorMsg) {
+              const fallback = await LNCrawlService.fetchChapterContent(chapter.id, {
+                autoFetch: true,
+              });
+              content = fallback.content;
+              if (fallback.title && fallback.title !== 'Chapter Content') {
+                fetchedTitle = fallback.title;
+              }
+              if (typeof fallback.wordCount === 'number') {
+                fetchedWordCount = fallback.wordCount;
+              }
+            }
+
+            if (!content || content.trim().length === 0) {
+              throw new Error(batchErrorMsg || 'Chapter content unavailable from server.');
+            }
+
+            await saveChapter({
+              ...chapter,
+              provider: 'lncrawl',
+              title: fetchedTitle,
+              content,
+              wordsCount: fetchedWordCount,
+              isDownloaded: true,
+            });
+
+            delete existingErrors[chapter.id];
+            completed++;
+          } catch (chErr: any) {
+            const msg = chErr?.message || 'Failed to save chapter';
+            console.warn(`Failed downloading chapter ${chapter.id}:`, chErr);
+            failedIds.push(chapter.id);
+            existingErrors[chapter.id] = msg;
+          }
+
+          this.chapterFailuresByNovel.set(novelId, { ...existingErrors });
+          task.completedChapters = completed;
+          task.failedChapters = failedIds.length;
+          task.failedChapterIds = [...failedIds];
+          task.chapterErrors = { ...existingErrors };
+          this.notify(task);
+        }
+      }
+    }
+
+    const totalFailed = failedIds.length;
+    if (completed === 0 && totalFailed > 0) {
+      const firstErr = existingErrors[failedIds[0]] || 'All chapters failed to download.';
+      this.notify({
+        ...task,
+        completedChapters: 0,
+        failedChapters: totalFailed,
+        failedChapterIds: failedIds,
+        chapterErrors: { ...existingErrors },
+        currentChapterTitle: firstErr,
+        status: 'failed',
+        error: firstErr,
+      });
+      return;
+    }
+
+    const completionMsg =
+      totalFailed > 0
+        ? `Downloaded ${completed} chapters (${totalFailed} failed)`
+        : 'All chapters downloaded!';
+
+    this.notify({
+      ...task,
+      completedChapters: completed,
+      failedChapters: totalFailed,
+      failedChapterIds: failedIds,
+      chapterErrors: { ...existingErrors },
+      currentChapterTitle: completionMsg,
+      status: 'completed',
+      error: totalFailed > 0 ? `${totalFailed} chapter(s) failed to download.` : undefined,
+    });
+
+    setTimeout(() => {
+      if (this.activeTasks.get(novelId)?.status === 'completed') {
+        this.activeTasks.delete(novelId);
+        this.notify({
+          novelId,
+          totalChapters: chaptersToDownload.length,
+          completedChapters: completed,
+          failedChapters: totalFailed,
+          failedChapterIds: failedIds,
+          chapterErrors: { ...existingErrors },
+          currentChapterTitle: '',
+          status: 'idle',
+        });
+      }
+    }, totalFailed > 0 ? 5000 : 3000);
+  }
+
+  /**
+   * Download a single chapter (e.g. from reader header button or chapter list row)
+   */
+  async downloadSingleChapter(novel: Novel, chapter: Chapter): Promise<Chapter> {
+    const existing = await getChapterById(chapter.id);
+    if (existing?.isDownloaded && existing.content && existing.content.trim().length > 0) {
+      this.clearChapterError(novel.id, chapter.id);
+      return existing;
+    }
+
+    const effectiveProvider = chapter.provider || novel.provider || 'lncrawl';
+    const localSource = getSource(effectiveProvider);
+
+    try {
+      let content = chapter.content;
+      let fetchedTitle = chapter.title;
+      let fetchedWordCount = chapter.wordsCount;
+
+      if (!content) {
+        if (localSource) {
+          const chPath = chapter.path || chapter.url;
+          if (!chPath) {
+            throw new Error('Chapter path is missing.');
+          }
+          content = await this.fetchLocalChapterWithRetries(localSource, chPath);
+          fetchedWordCount = countWords(content);
+        } else {
           const fetched = await LNCrawlService.fetchChapterContent(chapter.id);
           content = fetched.content;
           if (fetched.title && fetched.title !== 'Chapter Content') {
@@ -141,111 +534,31 @@ class DownloadManagerService {
             fetchedWordCount = fetched.wordCount;
           }
         }
-
-        // Save into app-private SQLite database
-        await saveChapter({
-          ...chapter,
-          title: fetchedTitle,
-          content,
-          wordsCount: fetchedWordCount,
-          isDownloaded: true,
-        });
-
-        completed++;
-        task.completedChapters = completed;
-        this.notify(task);
-
-        // Friendly interval between chapter requests
-        await new Promise((r) => setTimeout(r, 80));
-      } catch (err: any) {
-        console.warn(`Failed downloading chapter ${chapter.id}:`, err);
-        lastError = err?.message || 'Download error';
-        // Stop immediately on 401 Unauthorized
-        if (err?.status === 401) {
-          this.notify({
-            novelId,
-            totalChapters: chaptersToDownload.length,
-            completedChapters: completed,
-            currentChapterTitle: lastError || 'Authentication required',
-            status: 'failed',
-            error: lastError,
-          });
-          return;
-        }
       }
-    }
 
-    if (completed === 0 && chaptersToDownload.length > 0 && lastError) {
-      this.notify({
-        novelId,
-        totalChapters: chaptersToDownload.length,
-        completedChapters: 0,
-        currentChapterTitle: lastError,
-        status: 'failed',
-        error: lastError,
+      await upsertNovel({
+        ...novel,
+        provider: novel.provider || effectiveProvider,
       });
-      return;
+
+      const updatedChapter: Chapter = {
+        ...chapter,
+        provider: effectiveProvider,
+        title: fetchedTitle,
+        content,
+        wordsCount: fetchedWordCount,
+        isDownloaded: true,
+      };
+      await saveChapter(updatedChapter);
+      this.clearChapterError(novel.id, chapter.id);
+
+      return updatedChapter;
+    } catch (err: any) {
+      const currentMap = this.chapterFailuresByNovel.get(novel.id) || {};
+      currentMap[chapter.id] = err?.message || 'Download failed';
+      this.chapterFailuresByNovel.set(novel.id, currentMap);
+      throw err;
     }
-
-    this.notify({
-      novelId,
-      totalChapters: chaptersToDownload.length,
-      completedChapters: completed,
-      currentChapterTitle: 'All chapters downloaded!',
-      status: 'completed',
-    });
-
-    // Clear after 3 seconds
-    setTimeout(() => {
-      this.activeTasks.delete(novelId);
-      this.notify({
-        novelId,
-        totalChapters: chaptersToDownload.length,
-        completedChapters: completed,
-        currentChapterTitle: '',
-        status: 'idle',
-      });
-    }, 3000);
-  }
-
-  /**
-   * Download a single chapter (e.g. from reader header button)
-   */
-  async downloadSingleChapter(novel: Novel, chapter: Chapter): Promise<Chapter> {
-    const existing = await getChapterById(chapter.id);
-    if (existing?.isDownloaded && existing.content && existing.content.trim().length > 0) {
-      return existing;
-    }
-
-    let content = chapter.content;
-    let fetchedTitle = chapter.title;
-    let fetchedWordCount = chapter.wordsCount;
-
-    if (!content) {
-      const fetched = await LNCrawlService.fetchChapterContent(chapter.id);
-      content = fetched.content;
-      if (fetched.title && fetched.title !== 'Chapter Content') {
-        fetchedTitle = fetched.title;
-      }
-      if (typeof fetched.wordCount === 'number') {
-        fetchedWordCount = fetched.wordCount;
-      }
-    }
-
-    // Save novel metadata if not already present
-    await upsertNovel(novel);
-
-    // Save chapter to SQLite
-    const updatedChapter: Chapter = {
-      ...chapter,
-      title: fetchedTitle,
-      content,
-      wordsCount: fetchedWordCount,
-      isDownloaded: true,
-    };
-    await saveChapter(updatedChapter);
-
-    return updatedChapter;
   }
 
   pauseDownload(novelId: string) {
@@ -259,6 +572,11 @@ class DownloadManagerService {
   cancelDownload(novelId: string) {
     this.cancelFlags.set(novelId, true);
     this.pauseFlags.set(novelId, false);
+    const remoteJobId = this.activeRemoteJobs.get(novelId);
+    if (remoteJobId) {
+      this.activeRemoteJobs.delete(novelId);
+      LNCrawlService.cancelJob(remoteJobId).catch(() => {});
+    }
   }
 
   /**
@@ -285,7 +603,6 @@ class DownloadManagerService {
       }
     }
 
-    // Generate a standalone, styled, portable HTML book
     let htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -332,7 +649,6 @@ class DownloadManagerService {
       encoding: FileSystem.EncodingType.UTF8,
     });
 
-    // Check if sharing is available
     const canShare = await Sharing.isAvailableAsync();
     if (canShare) {
       await Sharing.shareAsync(filePath, {

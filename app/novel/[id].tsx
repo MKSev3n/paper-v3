@@ -21,8 +21,21 @@ import {
   saveChaptersBatch,
   getReadingProgress,
 } from '../../src/services/database';
-import { LNCrawlService } from '../../src/services/lncrawl';
+import { LNCrawlService, stripHtmlTags } from '../../src/services/lncrawl';
 import { DownloadManager } from '../../src/services/downloadManager';
+import {
+  buildLocalChapterId,
+  extractSourceDomain,
+  getSource,
+  toAbsoluteUrl,
+} from '../../src/sources';
+
+function normalizeStatus(rawStatus?: string): 'Ongoing' | 'Completed' | 'Hiatus' {
+  const lower = (rawStatus || '').toLowerCase();
+  if (lower.includes('complete')) return 'Completed';
+  if (lower.includes('hiatus') || lower.includes('stub')) return 'Hiatus';
+  return 'Ongoing';
+}
 
 export default function NovelDetailScreen() {
   const router = useRouter();
@@ -36,6 +49,7 @@ export default function NovelDetailScreen() {
   const [filterDownloadedOnly, setFilterDownloadedOnly] = useState(false);
   const [sortAscending, setSortAscending] = useState(true);
   const [downloadTask, setDownloadTask] = useState<DownloadTask | undefined>(undefined);
+  const [chapterErrors, setChapterErrors] = useState<Record<string, string>>({});
   const [isOfflineMode, setIsOfflineMode] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
@@ -51,16 +65,62 @@ export default function NovelDetailScreen() {
 
       // 2. Sync novel details and chapter list when online
       try {
-        const [remoteDetails, remoteChapters] = await Promise.all([
-          LNCrawlService.getNovelDetails(id),
-          LNCrawlService.getChapters(id),
-        ]);
-        localNovel = remoteDetails;
-        await upsertNovel(remoteDetails);
-        if (remoteChapters.length > 0) {
-          await saveChaptersBatch(remoteChapters);
-          localChapters = await getChaptersForNovel(id);
+        const localSource = getSource(localNovel?.provider);
+
+        if (localSource && (localNovel?.path || localNovel?.url)) {
+          const novelPath = localNovel!.path || localNovel!.url!;
+          const detail = await localSource.getNovel(novelPath);
+
+          const updatedNovel: Novel = {
+            ...localNovel!,
+            title: detail.title || localNovel!.title,
+            author: detail.author || localNovel!.author || 'Unknown',
+            synopsis: detail.summary ?? localNovel!.synopsis ?? '',
+            coverUrl: detail.cover || localNovel!.coverUrl || '',
+            status: detail.status ? normalizeStatus(detail.status) : localNovel!.status,
+            totalChapters: detail.chapters.length,
+            provider: localSource.id,
+            path: novelPath,
+            sourceDomain: localNovel!.sourceDomain || extractSourceDomain(localSource),
+            url: toAbsoluteUrl(novelPath, localSource.site),
+          };
+
+          const mappedChapters: Chapter[] = detail.chapters.map((ch, idx) => ({
+            id: buildLocalChapterId(localSource.id, ch.path),
+            novelId: updatedNovel.id,
+            serial: idx + 1,
+            title: ch.title || `Chapter ${idx + 1}`,
+            provider: localSource.id,
+            path: ch.path,
+            url: toAbsoluteUrl(ch.path, localSource.site),
+            isDownloaded: false,
+          }));
+
+          localNovel = updatedNovel;
+          await upsertNovel(updatedNovel);
+          if (mappedChapters.length > 0) {
+            await saveChaptersBatch(mappedChapters);
+            localChapters = await getChaptersForNovel(id);
+          }
+        } else if (!localNovel || !localNovel.provider || localNovel.provider === 'lncrawl') {
+          const [remoteDetails, remoteChapters] = await Promise.all([
+            LNCrawlService.getNovelDetails(id),
+            LNCrawlService.getChapters(id),
+          ]);
+          localNovel = {
+            ...remoteDetails,
+            provider: 'lncrawl',
+            path: remoteDetails.url || localNovel?.path,
+          };
+          await upsertNovel(localNovel);
+          if (remoteChapters.length > 0) {
+            await saveChaptersBatch(
+              remoteChapters.map((ch) => ({ ...ch, provider: 'lncrawl' }))
+            );
+            localChapters = await getChaptersForNovel(id);
+          }
         }
+
         setIsOfflineMode(false);
         setSyncError(null);
       } catch (netErr: any) {
@@ -81,12 +141,14 @@ export default function NovelDetailScreen() {
   useEffect(() => {
     loadData();
 
-    // Listen to download progress
+    // Listen to download progress & per-chapter failure updates
     const unsubscribe = DownloadManager.subscribe((task) => {
       if (task.novelId === id) {
         setDownloadTask({ ...task });
+        if (task.chapterErrors) {
+          setChapterErrors({ ...task.chapterErrors });
+        }
         if (task.status === 'completed' || task.status === 'idle') {
-          // Refresh chapter downloaded badges
           getChaptersForNovel(id).then(setChapters);
         }
       }
@@ -94,6 +156,7 @@ export default function NovelDetailScreen() {
 
     const active = DownloadManager.getTask(id);
     if (active) setDownloadTask(active);
+    setChapterErrors(DownloadManager.getChapterErrors(id));
 
     return () => unsubscribe();
   }, [id, loadData]);
@@ -135,14 +198,23 @@ export default function NovelDetailScreen() {
     DownloadManager.startDownload(novel, undownloaded);
   };
 
+  const handleRetryFailed = () => {
+    if (!novel) return;
+    const failedIds = new Set(Object.keys(chapterErrors));
+    const retryChapters = chapters.filter((c) => !c.isDownloaded && failedIds.has(c.id));
+    if (retryChapters.length === 0) return;
+    DownloadManager.startDownload(novel, retryChapters);
+  };
+
   const handleDownloadSingleChapter = async (chapter: Chapter) => {
     if (!novel) return;
     try {
       await DownloadManager.downloadSingleChapter(novel, chapter);
-      // Reload chapters to show offline badge
+      setChapterErrors(DownloadManager.getChapterErrors(novel.id));
       const updated = await getChaptersForNovel(novel.id);
       setChapters(updated);
     } catch (err: any) {
+      setChapterErrors(DownloadManager.getChapterErrors(novel.id));
       Alert.alert('Download Error', err.message || 'Failed to download chapter.');
     }
   };
@@ -163,7 +235,9 @@ export default function NovelDetailScreen() {
         <View style={styles.navRow}>
           <Pressable
             style={styles.navButton}
-            onPress={() => router.back()}
+            onPress={() =>
+              router.canGoBack() ? router.back() : router.replace('/(tabs)')
+            }
             hitSlop={10}
           >
             <Ionicons name="arrow-back" size={22} color={Colors.text} />
@@ -205,6 +279,11 @@ export default function NovelDetailScreen() {
                   <Text style={styles.statusPillText}>{novel.status}</Text>
                 </View>
               )}
+              {novel.sourceDomain ? (
+                <View style={styles.statusPill}>
+                  <Text style={styles.statusPillText}>{novel.sourceDomain}</Text>
+                </View>
+              ) : null}
               <Text style={styles.totalChaptersLabel}>
                 {chapters.length || novel.totalChapters} Ch.
               </Text>
@@ -244,7 +323,7 @@ export default function NovelDetailScreen() {
               style={styles.synopsisText}
               numberOfLines={synopsisExpanded ? undefined : 3}
             >
-              {novel.synopsis}
+              {stripHtmlTags(novel.synopsis)}
             </Text>
             <Text style={styles.synopsisToggle}>
               {synopsisExpanded ? 'Show less' : 'Read more'}
@@ -271,10 +350,17 @@ export default function NovelDetailScreen() {
                 <Text style={styles.activeTaskChapter} numberOfLines={1}>
                   {downloadTask.currentChapterTitle}
                 </Text>
-                <Text style={styles.activeTaskPercent}>
-                  {Math.round(
-                    (downloadTask.completedChapters / (downloadTask.totalChapters || 1)) * 100
-                  )}%
+                <Text
+                  style={[
+                    styles.activeTaskPercent,
+                    downloadTask.status === 'failed' && { color: Colors.danger },
+                  ]}
+                >
+                  {downloadTask.status === 'failed'
+                    ? 'Failed'
+                    : `${Math.round(
+                        (downloadTask.completedChapters / (downloadTask.totalChapters || 1)) * 100
+                      )}%`}
                 </Text>
               </View>
 
@@ -284,6 +370,8 @@ export default function NovelDetailScreen() {
                     styles.downloadProgressFill,
                     {
                       width: `${(downloadTask.completedChapters / (downloadTask.totalChapters || 1)) * 100}%`,
+                      backgroundColor:
+                        downloadTask.status === 'failed' ? Colors.danger : Colors.primary,
                     },
                   ]}
                 />
@@ -292,6 +380,9 @@ export default function NovelDetailScreen() {
               <View style={styles.taskActionsRow}>
                 <Text style={styles.taskStatusText}>
                   {downloadTask.completedChapters} of {downloadTask.totalChapters} chapters
+                  {(downloadTask.failedChapters || 0) > 0
+                    ? ` • ${downloadTask.failedChapters} failed`
+                    : ''}
                 </Text>
 
                 <View style={styles.taskButtons}>
@@ -313,17 +404,41 @@ export default function NovelDetailScreen() {
                     </Pressable>
                   ) : null}
 
-                  <Pressable
-                    style={styles.taskControlButton}
-                    onPress={() => DownloadManager.cancelDownload(novel.id)}
-                  >
-                    <Ionicons name="close" size={14} color={Colors.danger} />
-                    <Text style={styles.taskControlDangerText}>Cancel</Text>
-                  </Pressable>
+                  {downloadTask.status === 'failed' && Object.keys(chapterErrors).length > 0 ? (
+                    <Pressable
+                      style={styles.taskControlButton}
+                      onPress={handleRetryFailed}
+                    >
+                      <Ionicons name="refresh" size={14} color={Colors.primary} />
+                      <Text style={styles.taskControlText}>Retry Failed</Text>
+                    </Pressable>
+                  ) : null}
+
+                  {(downloadTask.status === 'downloading' || downloadTask.status === 'paused') && (
+                    <Pressable
+                      style={styles.taskControlButton}
+                      onPress={() => DownloadManager.cancelDownload(novel.id)}
+                    >
+                      <Ionicons name="close" size={14} color={Colors.danger} />
+                      <Text style={styles.taskControlDangerText}>Cancel</Text>
+                    </Pressable>
+                  )}
                 </View>
               </View>
             </View>
           )}
+
+          {Object.keys(chapterErrors).length > 0 &&
+            (!downloadTask || downloadTask.status === 'idle') && (
+              <View style={styles.chapterFailuresBanner}>
+                <Text style={styles.chapterFailuresText}>
+                  {Object.keys(chapterErrors).length} chapter(s) failed during download.
+                </Text>
+                <Pressable style={styles.retryFailedBtn} onPress={handleRetryFailed}>
+                  <Text style={styles.retryFailedText}>Retry Failed</Text>
+                </Pressable>
+              </View>
+            )}
 
           {/* Offline / Auth Notice when remote sync unavailable */}
           {isOfflineMode && (
@@ -420,12 +535,14 @@ export default function NovelDetailScreen() {
 
   const renderChapterItem = ({ item }: { item: Chapter }) => {
     const isCurrentProgress = progress?.chapterId === item.id;
+    const chapterErr = chapterErrors[item.id];
 
     return (
       <Pressable
         style={({ pressed }) => [
           styles.chapterRow,
           isCurrentProgress && styles.chapterRowCurrent,
+          chapterErr && !item.isDownloaded && styles.chapterRowFailed,
           pressed && styles.cardPressed,
         ]}
         onPress={() => {
@@ -453,6 +570,11 @@ export default function NovelDetailScreen() {
                 Reading • {Math.round(progress?.scrollPercentage || 0)}%
               </Text>
             )}
+            {chapterErr && !item.isDownloaded && (
+              <Text style={styles.chapterErrorBadge} numberOfLines={1}>
+                Failed: {chapterErr}
+              </Text>
+            )}
           </View>
         </View>
 
@@ -461,6 +583,14 @@ export default function NovelDetailScreen() {
             <View style={styles.downloadedCheck}>
               <Ionicons name="checkmark-circle" size={18} color={Colors.success} />
             </View>
+          ) : chapterErr && !isOfflineMode ? (
+            <Pressable
+              style={styles.singleDownloadBtn}
+              onPress={() => handleDownloadSingleChapter(item)}
+              hitSlop={10}
+            >
+              <Ionicons name="refresh-circle" size={20} color={Colors.danger} />
+            </Pressable>
           ) : !isOfflineMode ? (
             <Pressable
               style={styles.singleDownloadBtn}
@@ -882,5 +1012,44 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: Colors.warning,
     lineHeight: 16,
+  },
+  chapterRowFailed: {
+    borderColor: 'rgba(239, 68, 68, 0.4)',
+  },
+  chapterErrorBadge: {
+    fontSize: 10,
+    color: Colors.danger,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+  chapterFailuresBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: Colors.dangerMuted,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.35)',
+    gap: 8,
+  },
+  chapterFailuresText: {
+    flex: 1,
+    fontSize: 12,
+    color: Colors.danger,
+    fontWeight: '600',
+  },
+  retryFailedBtn: {
+    backgroundColor: Colors.danger,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  retryFailedText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
 });

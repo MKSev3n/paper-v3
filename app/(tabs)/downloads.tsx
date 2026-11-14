@@ -190,6 +190,9 @@ export default function DownloadsScreen() {
                 <View style={styles.taskFooterRow}>
                   <Text style={styles.taskCountText}>
                     {task.completedChapters} of {task.totalChapters} chapters
+                    {(task.failedChapters || 0) > 0
+                      ? ` • ${task.failedChapters} failed`
+                      : ''}
                   </Text>
 
                   {(task.status === 'downloading' || task.status === 'paused') && (

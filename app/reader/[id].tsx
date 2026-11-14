@@ -34,6 +34,7 @@ import {
 } from '../../src/services/storage';
 import { LNCrawlService } from '../../src/services/lncrawl';
 import { DownloadManager } from '../../src/services/downloadManager';
+import { getSource } from '../../src/sources';
 
 const { width } = Dimensions.get('window');
 
@@ -153,8 +154,9 @@ export default function ReaderScreen() {
       setSettings(savedSettings);
 
       // 1. Load Novel metadata
+      let novelData: Novel | null = null;
       if (novelId) {
-        const novelData = await getNovelById(novelId);
+        novelData = await getNovelById(novelId);
         setNovel(novelData);
         const list = await getChaptersForNovel(novelId);
         setChaptersList(list);
@@ -163,25 +165,49 @@ export default function ReaderScreen() {
 
       // 2. Load Chapter from local SQLite first
       let ch = await getChapterById(targetChapterId);
+      const effectiveProvider = ch?.provider || novelData?.provider || 'lncrawl';
+      const localSource = getSource(effectiveProvider);
 
-      // If chapter text not downloaded locally, fetch from LNCrawl API
+      // If chapter text not downloaded locally, fetch from local source or LNCrawl API
       if (!ch || !ch.content) {
         try {
-          const fetched = await LNCrawlService.fetchChapterContent(targetChapterId);
-          const fullChapter: Chapter = {
-            id: targetChapterId,
-            novelId: novelId || ch?.novelId || '',
-            serial: ch?.serial || 1,
-            title:
-              fetched.title && fetched.title !== 'Chapter Content'
-                ? fetched.title
-                : ch?.title || `Chapter ${ch?.serial || 1}`,
-            content: fetched.content,
-            wordsCount: fetched.wordCount ?? ch?.wordsCount,
-            isDownloaded: true,
-          };
-          await saveChapter(fullChapter);
-          ch = fullChapter;
+          if (localSource) {
+            const chapterPath = ch?.path || ch?.url;
+            if (!chapterPath) {
+              throw new Error('Chapter path is missing for this local source.');
+            }
+            const content = await localSource.getChapter(chapterPath);
+            const fullChapter: Chapter = {
+              id: targetChapterId,
+              novelId: novelId || ch?.novelId || '',
+              serial: ch?.serial || 1,
+              title: ch?.title || `Chapter ${ch?.serial || 1}`,
+              provider: localSource.id,
+              path: chapterPath,
+              content,
+              wordsCount: content.trim().split(/\s+/).filter(Boolean).length,
+              isDownloaded: true,
+            };
+            await saveChapter(fullChapter);
+            ch = fullChapter;
+          } else {
+            const fetched = await LNCrawlService.fetchChapterContent(targetChapterId);
+            const fullChapter: Chapter = {
+              id: targetChapterId,
+              novelId: novelId || ch?.novelId || '',
+              serial: ch?.serial || 1,
+              title:
+                fetched.title && fetched.title !== 'Chapter Content'
+                  ? fetched.title
+                  : ch?.title || `Chapter ${ch?.serial || 1}`,
+              provider: 'lncrawl',
+              content: fetched.content,
+              wordsCount: fetched.wordCount ?? ch?.wordsCount,
+              isDownloaded: true,
+            };
+            await saveChapter(fullChapter);
+            ch = fullChapter;
+          }
         } catch (fetchErr: any) {
           if (!ch?.content) {
             setError(
@@ -192,7 +218,7 @@ export default function ReaderScreen() {
         }
       }
 
-      if (ch?.content) {
+      if (ch?.content && !localSource) {
         // Best-effort sync to server read history when online & authenticated
         LNCrawlService.markChapterRead(targetChapterId).catch(() => {});
       }
@@ -384,7 +410,10 @@ export default function ReaderScreen() {
         >
           <Text style={styles.retryButtonText}>Retry</Text>
         </Pressable>
-        <Pressable style={styles.backButtonSimple} onPress={() => router.back()}>
+        <Pressable
+          style={styles.backButtonSimple}
+          onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)'))}
+        >
           <Text style={[styles.backButtonSimpleText, { color: currentTheme.textSecondary }]}>
             Go Back
           </Text>
@@ -417,7 +446,11 @@ export default function ReaderScreen() {
           },
         ]}
       >
-        <Pressable style={styles.barIconButton} onPress={() => router.back()} hitSlop={10}>
+        <Pressable
+          style={styles.barIconButton}
+          onPress={() => (router.canGoBack() ? router.back() : router.replace('/(tabs)'))}
+          hitSlop={10}
+        >
           <Ionicons name="arrow-back" size={22} color={currentTheme.text} />
         </Pressable>
 

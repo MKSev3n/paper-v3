@@ -116,6 +116,16 @@ export interface LNCrawlJob {
   extra?: Record<string, any>;
 }
 
+export interface LNCrawlSearchResult {
+  url: string;
+  title: string;
+  author?: string | null;
+  cover_url?: string | null;
+  domain?: string | null;
+  novel_id?: string | null;
+  [key: string]: any;
+}
+
 export interface LNCrawlArtifact {
   id: string;
   novel_id: string;

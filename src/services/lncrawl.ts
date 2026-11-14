@@ -12,6 +12,7 @@ import {
   LNCrawlUser,
   LNCrawlJob,
   LNCrawlArtifact,
+  LNCrawlSearchResult,
 } from '../types';
 import {
   getStoredAuthToken,
@@ -33,7 +34,8 @@ export class LNCrawlError extends Error {
 async function apiFetch<T>(
   endpoint: string,
   options: RequestInit = {},
-  timeoutMs: number = APP_CONFIG.defaultTimeoutMs
+  timeoutMs: number = APP_CONFIG.defaultTimeoutMs,
+  allowRetry: boolean = true
 ): Promise<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -94,6 +96,14 @@ async function apiFetch<T>(
     return JSON.parse(text) as T;
   } catch (err: any) {
     clearTimeout(timeoutId);
+    const method = (options.method || 'GET').toUpperCase();
+    const transient = err?.name === 'AbortError' || !(err instanceof LNCrawlError);
+    // Retry once for idempotent GETs only (Render cold starts can exceed 45s).
+    // Never auto-retry POSTs such as job creation: they are not idempotent.
+    if (allowRetry && method === 'GET' && transient) {
+      await new Promise((r) => setTimeout(r, 3000));
+      return apiFetch<T>(endpoint, options, timeoutMs, false);
+    }
     if (err?.name === 'AbortError') {
       throw new LNCrawlError(
         'Request timed out. The server may be warming up from cold start.',
@@ -370,6 +380,126 @@ export const LNCrawlService = {
       body: JSON.stringify({ urls, full }),
     });
   },
+
+  /**
+   * Full external-source search pipeline for a genuine local-database miss:
+   * 1. Create a SEARCH_ALL_SOURCES job (POST /api/job/create/search-sources without domain).
+   * 2. Poll it (JobStatus: 0 pending, 1 running, 2 success, 3 failed, 4 canceled, 5 paused).
+   * 3. On success, read `extra.search_results` (the server also spawns NOVEL_BATCH
+   *    children to fetch metadata for the matched URLs).
+   * 4. If metadata is not yet in the database, create a fetch-novels job for the URLs,
+   *    poll it, then let the caller re-query /api/novels.
+   * Does NOT retry job creation on timeout/network error (non-idempotent POSTs).
+   */
+  async externalSearch(
+    query: string,
+    hooks: {
+      onPhase: (phase: 'searching' | 'fetching', detail: string) => void;
+    } = { onPhase: () => {} }
+  ): Promise<
+    | { outcome: 'results' }
+    | { outcome: 'no_results' }
+    | { outcome: 'failed'; reason: string }
+    | { outcome: 'canceled' }
+    | { outcome: 'timeout' }
+  > {
+    const trimmed = query.trim();
+    if (trimmed.length < 2 || trimmed.length > 50) {
+      return { outcome: 'failed', reason: 'Search query must be 2-50 characters.' };
+    }
+
+    let searchJob: LNCrawlJob;
+    try {
+      searchJob = await this.createSearchSourcesJob(trimmed);
+    } catch (err: any) {
+      return {
+        outcome: 'failed',
+        reason: err?.message || 'Could not start the external search job.',
+      };
+    }
+
+    hooks.onPhase('searching', 'Searching external sources...');
+    const finishedSearch = await this.pollJobUntilDone(searchJob.id, 180000);
+    if (finishedSearch.outcome !== 'done') {
+      return finishedSearch as
+        | { outcome: 'failed'; reason: string }
+        | { outcome: 'canceled' }
+        | { outcome: 'timeout' };
+    }
+
+    const searchResults: LNCrawlSearchResult[] =
+      finishedSearch.job?.extra?.search_results || [];
+    if (!Array.isArray(searchResults) || searchResults.length === 0) {
+      return { outcome: 'no_results' };
+    }
+
+    // The server auto-creates NOVEL_BATCH children that fetch metadata for the
+    // matched URLs. Give the database a moment, then check whether the novels
+    // are queryable; if not, explicitly run fetch-novels (idempotent on the
+    // server side for already-known novels, safe to call with matched URLs).
+    hooks.onPhase('fetching', 'Fetching novel details from sources...');
+    await new Promise((r) => setTimeout(r, 5000));
+
+    const urls = searchResults.map((r) => r.url).filter(Boolean);
+    let fetchJob: LNCrawlJob | null = null;
+    try {
+      fetchJob = await this.createFetchNovelsJob(urls, false);
+    } catch (err: any) {
+      return { outcome: 'failed', reason: err?.message || 'Could not start the fetch job.' };
+    }
+
+    hooks.onPhase('fetching', 'Downloading novel information...');
+    const finishedFetch = await this.pollJobUntilDone(fetchJob.id, 240000);
+    if (finishedFetch.outcome !== 'done') {
+      return finishedFetch as
+        | { outcome: 'failed'; reason: string }
+        | { outcome: 'canceled' }
+        | { outcome: 'timeout' };
+    }
+
+    return { outcome: 'results' };
+  },
+
+  /**
+   * Poll GET /api/job/{id} using the real Job schema. GETs are idempotent and
+   * already benefit from the cold-start retry in apiFetch.
+   */
+  async pollJobUntilDone(
+    jobId: string,
+    timeoutMs: number = 120000
+  ): Promise<
+    | { outcome: 'done'; job: LNCrawlJob }
+    | { outcome: 'failed'; reason: string }
+    | { outcome: 'canceled' }
+    | { outcome: 'timeout' }
+  > {
+    const start = Date.now();
+    const pollIntervalMs = 4000;
+    while (Date.now() - start < timeoutMs) {
+      let job: LNCrawlJob;
+      try {
+        job = await this.getJobStatus(jobId);
+      } catch (err: any) {
+        return { outcome: 'failed', reason: err?.message || 'Lost contact with the server while polling the job.' };
+      }
+      if (job.is_done) {
+        // JobStatus: SUCCESS=2, FAILED=3, CANCELED=4
+        if (job.status === 4 || /cancel/i.test(job.error || '')) {
+          return { outcome: 'canceled' };
+        }
+        if (job.status === 3) {
+          return { outcome: 'failed', reason: job.error || 'The crawl job failed on the server.' };
+        }
+        if (job.error) {
+          return { outcome: 'failed', reason: job.error };
+        }
+        return { outcome: 'done', job };
+      }
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
+    return { outcome: 'timeout' };
+  },
+
 
   async createFetchChaptersJob(chapterIds: string[]): Promise<LNCrawlJob> {
     return apiFetch<LNCrawlJob>('/api/job/create/fetch-chapters', {

@@ -22,6 +22,10 @@ import { upsertNovel } from '../../src/services/database';
 
 const QUICK_TAGS = ['Fantasy', 'Isekai', 'Action', 'Adventure', 'Romance', 'Cultivation', 'Sci-Fi'];
 
+//Queries currently running (or already finished with) an external crawl job.
+//Prevents launching duplicate crawl jobs for the same query.
+const externalSearchAttempts = new Map<string, 'running' | 'done'>();
+
 export default function SearchScreen() {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState('');
@@ -35,6 +39,10 @@ export default function SearchScreen() {
     user?: LNCrawlUser;
   }>({ tested: false, online: true, authenticated: false, latencyMs: 0 });
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [externalSearchState, setExternalSearchState] = useState<
+    | { active: false }
+    | { active: true; phase: 'searching' | 'fetching'; detail: string }
+  >({ active: false });
 
   // Auth Modal State
   const [authModalVisible, setAuthModalVisible] = useState(false);
@@ -88,12 +96,15 @@ export default function SearchScreen() {
       const novels = await LNCrawlService.searchNovels(term);
       setResults(novels);
       if (novels.length === 0) {
-        setErrorMessage(`No novels found for "${term}". Try another title or author.`);
+        setErrorMessage(`No novels found for "${term}" in the server database.`);
+        await runExternalSearch(term);
       }
     } catch (err: any) {
       console.warn('Search failed:', err);
       if (err?.status === 401) {
-        setErrorMessage('Sign in to your LNCrawl account to search and download novels.');
+        setErrorMessage(
+          'LNCrawl requires a free account to search. Sign in below to search and download novels.'
+        );
         setAuthModalVisible(true);
       } else {
         setErrorMessage(
@@ -102,6 +113,71 @@ export default function SearchScreen() {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  /**
+   * External crawl fallback, only after a genuine database miss.
+   * Guards against duplicate jobs for the same query via a module-level map.
+   */
+  const runExternalSearch = async (term: string) => {
+    const key = term.trim().toLowerCase();
+    if (externalSearchAttempts.get(key) === 'running') {
+      setErrorMessage('An external search for this title is already in progress.');
+      return;
+    }
+    if (externalSearchAttempts.get(key) === 'done') {
+      setErrorMessage(
+        `No novels found for "${term}". External sources were already searched for this title.`
+      );
+      return;
+    }
+
+    externalSearchAttempts.set(key, 'running');
+    setExternalSearchState({ active: true, phase: 'searching', detail: 'Searching external sources...' });
+
+    try {
+      const outcome = await LNCrawlService.externalSearch(term, {
+        onPhase: (phase, detail) => setExternalSearchState({ active: true, phase, detail }),
+      });
+
+      switch (outcome.outcome) {
+        case 'results': {
+          externalSearchAttempts.set(key, 'done');
+          const novels = await LNCrawlService.searchNovels(term);
+          setResults(novels);
+          if (novels.length > 0) {
+            setErrorMessage(null);
+          } else {
+            setErrorMessage(
+              `External sources matched "${term}", but the details are still being processed. Try again in a minute.`
+            );
+          }
+          break;
+        }
+        case 'no_results':
+          externalSearchAttempts.set(key, 'done');
+          setErrorMessage(
+            `No novels found for "${term}" in the server database or on any external source.`
+          );
+          break;
+        case 'canceled':
+          externalSearchAttempts.delete(key);
+          setErrorMessage('The external search was canceled on the server.');
+          break;
+        case 'timeout':
+          externalSearchAttempts.delete(key);
+          setErrorMessage(
+            'The external search took too long and was stopped. Try again - the server may be busy.'
+          );
+          break;
+        case 'failed':
+          externalSearchAttempts.delete(key);
+          setErrorMessage(`External search failed: ${outcome.reason}`);
+          break;
+      }
+    } finally {
+      setExternalSearchState({ active: false });
     }
   };
 
@@ -293,6 +369,33 @@ export default function SearchScreen() {
         />
       </View>
 
+      {externalSearchState.active && (
+        <View style={styles.externalProgressCard}>
+          <View style={styles.externalProgressRow}>
+            <ActivityIndicator size="small" color={Colors.primary} />
+            <View style={styles.externalProgressTextGroup}>
+              <Text style={styles.externalProgressTitle}>
+                {externalSearchState.phase === 'searching'
+                  ? 'Searching external sources'
+                  : 'Fetching novel details'}
+              </Text>
+              <Text style={styles.externalProgressDetail}>{externalSearchState.detail}</Text>
+            </View>
+          </View>
+          <View style={styles.externalProgressBarBg}>
+            <View
+              style={[
+                styles.externalProgressBarFill,
+                externalSearchState.phase === 'fetching' && styles.externalProgressBarWide,
+              ]}
+            />
+          </View>
+          <Text style={styles.externalProgressHint}>
+            This can take a couple of minutes on the free server. Results appear automatically.
+          </Text>
+        </View>
+      )}
+
       {errorMessage && (
         <View style={styles.errorBanner}>
           <Ionicons name="alert-circle" size={18} color={Colors.warning} />
@@ -386,9 +489,16 @@ export default function SearchScreen() {
         >
           <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>
-                {serverStatus.authenticated ? 'LNCrawl Account' : 'Sign In to LNCrawl'}
-              </Text>
+              <View style={styles.modalHeaderTextGroup}>
+                <Text style={styles.modalTitle}>
+                  {serverStatus.authenticated ? 'LNCrawl Account' : 'Sign In to LNCrawl'}
+                </Text>
+                {!serverStatus.authenticated && (
+                  <Text style={styles.modalSubtitle}>
+                    The server requires an account to search or download.
+                  </Text>
+                )}
+              </View>
               <Pressable onPress={closeAuthModal} hitSlop={10}>
                 <Ionicons name="close" size={20} color={Colors.textMuted} />
               </Pressable>
@@ -665,6 +775,53 @@ const styles = StyleSheet.create({
   resultsCountRow: {
     marginBottom: 12,
   },
+  externalProgressCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: Colors.primaryMuted,
+    padding: 14,
+    marginBottom: 16,
+  },
+  externalProgressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  externalProgressTextGroup: {
+    flex: 1,
+  },
+  externalProgressTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Colors.text,
+  },
+  externalProgressDetail: {
+    fontSize: 12,
+    color: Colors.textMuted,
+    marginTop: 2,
+  },
+  externalProgressBarBg: {
+    height: 6,
+    backgroundColor: Colors.surfaceRaised,
+    borderRadius: 3,
+    marginTop: 12,
+    overflow: 'hidden',
+  },
+  externalProgressBarFill: {
+    height: '100%',
+    width: '25%',
+    backgroundColor: Colors.primary,
+    borderRadius: 3,
+  },
+  externalProgressBarWide: {
+    width: '65%',
+  },
+  externalProgressHint: {
+    fontSize: 11,
+    color: Colors.textMuted,
+    marginTop: 8,
+  },
   resultsCountText: {
     fontSize: 12,
     fontWeight: '600',
@@ -764,6 +921,15 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 16,
+  },
+  modalHeaderTextGroup: {
+    flex: 1,
+    marginRight: 8,
+  },
+  modalSubtitle: {
+    fontSize: 12,
+    color: Colors.textMuted,
+    marginTop: 2,
   },
   modalTitle: {
     fontSize: 17,

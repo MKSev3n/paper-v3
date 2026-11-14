@@ -21,13 +21,27 @@
       "adaptiveIcon": {
         "backgroundColor": "#0D0F14",
         "foregroundImage": "./assets/android-icon-foreground.png"
-      }
+      },
+      "permissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET"
+      ],
+      "versionCode": 3
     },
     "plugins": [
       "expo-router",
       "expo-sqlite",
       "expo-file-system",
       "expo-secure-store"
-    ]
+    ],
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "39bf8182-704f-4ff7-b689-e73cbecfecdf"
+      }
+    }
   }
 }

@@ -6,6 +6,8 @@ export interface SearchItem {
   sourceId: string;
 }
 
+export type ListingKind = 'hot' | 'popular' | 'latest';
+
 export interface ChapterItem {
   title: string;
   path: string;
@@ -26,6 +28,8 @@ export interface Source {
   name: string;
   site: string;
   search(query: string): Promise<SearchItem[]>;
+  getByGenre(genre: string, page?: number): Promise<SearchItem[]>;
+  getListing(kind: ListingKind, page?: number): Promise<SearchItem[]>;
   getNovel(path: string): Promise<NovelDetail>;
   getChapter(path: string): Promise<string>;
 }

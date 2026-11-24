@@ -14,7 +14,7 @@ import {
   Alert,
   LayoutChangeEvent,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { ReaderThemes, ReaderThemeMode, Colors } from '../../src/theme/colors';
@@ -87,6 +87,10 @@ export default function ReaderScreen() {
   }>();
 
   const scrollViewRef = useRef<ScrollView>(null);
+
+  // Safe-area insets for the bottom chrome bar and scroll padding
+  const insets = useSafeAreaInsets();
+  const bottomBarHeight = 56 + insets.bottom + 8;
 
   const [chapter, setChapter] = useState<Chapter | null>(null);
   const [novel, setNovel] = useState<Novel | null>(null);
@@ -427,19 +431,20 @@ export default function ReaderScreen() {
       style={[styles.container, { backgroundColor: currentTheme.background }]}
       edges={['left', 'right']}
     >
-      {/* Top Header Bar */}
+      {/* Bottom Bar */}
       <Animated.View
         style={[
-          styles.topBar,
+          styles.bottomBar,
           {
             backgroundColor: currentTheme.surface,
-            borderBottomColor: currentTheme.border,
+            borderTopColor: currentTheme.border,
+            paddingBottom: insets.bottom + 8,
             opacity: barsAnim,
             transform: [
               {
                 translateY: barsAnim.interpolate({
                   inputRange: [0, 1],
-                  outputRange: [-60, 0],
+                  outputRange: [bottomBarHeight, 0],
                 }),
               },
             ],
@@ -492,7 +497,10 @@ export default function ReaderScreen() {
       <ScrollView
         ref={scrollViewRef}
         style={styles.scrollArea}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[
+          styles.scrollContent,
+          { paddingTop: insets.top + 12, paddingBottom: bottomBarHeight + 24 },
+        ]}
         onLayout={handleScrollViewLayout}
         onContentSizeChange={handleContentSizeChange}
         onScroll={handleScroll}
@@ -773,17 +781,17 @@ const styles = StyleSheet.create({
   backButtonSimpleText: {
     fontSize: 13,
   },
-  topBar: {
+  bottomBar: {
     position: 'absolute',
-    top: 0,
+    bottom: 0,
     left: 0,
     right: 0,
-    height: 56,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 12,
-    borderBottomWidth: 1,
+    paddingTop: 8,
+    borderTopWidth: 1,
     zIndex: 10,
   },
   barIconButton: {
@@ -814,8 +822,6 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingTop: 70,
-    paddingBottom: 60,
     paddingHorizontal: 20,
   },
   readingHeader: {

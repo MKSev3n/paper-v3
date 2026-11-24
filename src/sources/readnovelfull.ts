@@ -1,5 +1,5 @@
 import { HTMLElement } from 'node-html-parser';
-import { ChapterItem, NovelDetail, SearchItem, Source } from './types';
+import { ChapterItem, ListingKind, NovelDetail, SearchItem, Source } from './types';
 import {
   decodeHtmlEntities,
   extractCleanParagraphText,
@@ -16,6 +16,8 @@ export interface NovelFullFamilyConfig {
   name: string;
   site: string;
   searchUrl: (encodedQuery: string) => string;
+  genrePath: (genre: string) => string;
+  listingPaths: Record<ListingKind, string>;
   searchItemSelectors: string[];
   searchTitleSelectors: string[];
   novelTitleSelectors: string[];
@@ -87,6 +89,88 @@ export class NovelFullFamilySource implements Source {
       }
     }
 
+    return this.parseListItems(doc);
+  }
+
+  async getByGenre(genre: string, page: number = 1): Promise<SearchItem[]> {
+    const trimmed = genre.trim();
+    if (!trimmed) return [];
+
+    let path = this.config.genrePath(trimmed);
+    if (!path) return [];
+    if (page > 1) {
+      path = appendPageParam(path, page);
+    }
+
+    const url = toAbsoluteUrl(path, this.site);
+
+    let html: string;
+    try {
+      html = await fetchHtml(url, { site: this.site });
+    } catch (err: any) {
+      // A missing genre page (404) is treated as "no results", not an error.
+      if (err?.status === 404) return [];
+      throw err;
+    }
+
+    const doc = parseDocument(html);
+
+    if (this.config.searchIgnoreSelectors) {
+      for (const ignoreSel of this.config.searchIgnoreSelectors) {
+        for (const ignored of doc.querySelectorAll(ignoreSel)) {
+          ignored.remove();
+        }
+      }
+    }
+
+    return this.parseListItems(doc, {
+      stripMtlPrefix: true,
+      skipChapterLinks: true,
+    });
+  }
+
+  async getListing(kind: ListingKind, page: number = 1): Promise<SearchItem[]> {
+    let path = this.config.listingPaths[kind];
+    if (!path) return [];
+    if (page > 1) {
+      path = appendPageParam(path, page);
+    }
+
+    const url = toAbsoluteUrl(path, this.site);
+
+    let html: string;
+    try {
+      html = await fetchHtml(url, { site: this.site });
+    } catch {
+      // Any HTTP/network error for a listing returns an empty list, never throws.
+      return [];
+    }
+
+    const doc = parseDocument(html);
+
+    if (this.config.searchIgnoreSelectors) {
+      for (const ignoreSel of this.config.searchIgnoreSelectors) {
+        for (const ignored of doc.querySelectorAll(ignoreSel)) {
+          ignored.remove();
+        }
+      }
+    }
+
+    return this.parseListItems(doc, {
+      stripMtlPrefix: true,
+      skipChapterLinks: true,
+    });
+  }
+
+  /**
+   * Shared row parsing for search and genre listing pages.
+   * Uses the same item selectors/title selectors as search so both paths
+   * stay in sync. Options only add extra filtering for genre listings.
+   */
+  private parseListItems(
+    doc: HTMLElement,
+    options?: { stripMtlPrefix?: boolean; skipChapterLinks?: boolean }
+  ): SearchItem[] {
     const rows = queryAllFirstMatch(doc, this.config.searchItemSelectors);
     const results: SearchItem[] = [];
 
@@ -112,10 +196,17 @@ export class NovelFullFamilySource implements Source {
 
       if (!titleAnchor || !path) continue;
 
-      const title = decodeHtmlEntities(
+      if (options?.skipChapterLinks && /\/chapter-/i.test(path)) continue;
+
+      let title = decodeHtmlEntities(
         titleAnchor.getAttribute('title') || titleAnchor.text || ''
       ).trim();
       if (!title) continue;
+
+      if (options?.stripMtlPrefix) {
+        title = title.replace(/^MTL-\s*/i, '').trim();
+        if (!title) continue;
+      }
 
       const cover = extractImageSrc(row.querySelector('img'), this.site);
       const authorEl =
@@ -378,6 +469,12 @@ export const readNovelFullSource = new NovelFullFamilySource({
   name: 'ReadNovelFull',
   site: 'https://readnovelfull.com',
   searchUrl: (q) => `/novel-list/search?keyword=${q}`,
+  genrePath: (genre) => `/genres/${genre.toLowerCase().replace(/\s+/g, '-')}`,
+  listingPaths: {
+    hot: '/novel-list/hot-novel',
+    popular: '/novel-list/most-popular-novel',
+    latest: '/novel-list/latest-release-novel',
+  },
   searchItemSelectors: ['.list-novel > .row', '.list-truyen .row', '.archive .list-novel .row'],
   searchTitleSelectors: ['h3 a', 'h3.novel-title a', '.novel-title a'],
   novelTitleSelectors: ['h3.title', 'h1', '.books .title'],
@@ -394,6 +491,17 @@ export const novelFullSource = new NovelFullFamilySource({
   name: 'NovelFull',
   site: 'https://novelfull.com',
   searchUrl: (q) => `/search?keyword=${q}`,
+  genrePath: (genre) =>
+    `/genre/${genre
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join('-')}`,
+  listingPaths: {
+    hot: '/hot-novel',
+    popular: '/most-popular',
+    latest: '/latest-release-novel',
+  },
   searchItemSelectors: ['.list-truyen .row', '.list-novel .row'],
   searchTitleSelectors: ['h3.truyen-title a', 'h3 a', '.truyen-title a'],
   novelTitleSelectors: ['h3.title', 'h1', '.books .title'],
@@ -410,6 +518,12 @@ export const novelBinSource = new NovelFullFamilySource({
   name: 'NovelBin',
   site: 'https://novelbin.com',
   searchUrl: (q) => `/search?keyword=${q}`,
+  genrePath: (genre) => `/genre/${genre.toLowerCase().replace(/\s+/g, '-')}`,
+  listingPaths: {
+    hot: '/sort/top-hot-novel',
+    popular: '/sort/top-view-novel',
+    latest: '/sort/latest',
+  },
   searchIgnoreSelectors: ['.list-search-res'],
   searchItemSelectors: ['.list.list-novel > .row', '.list.list-novel .row'],
   searchTitleSelectors: ['h3 a'],

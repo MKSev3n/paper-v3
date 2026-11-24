@@ -11,8 +11,10 @@ import {
   Keyboard,
   Modal,
   ScrollView,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors } from '../../src/theme/colors';
@@ -35,13 +37,15 @@ import {
   buildLocalNovelId,
   extractSourceDomain,
   getSource,
+  ListingKind,
   matchSourceByUrl,
+  SearchItem,
   Source,
   SOURCES,
   toAbsoluteUrl,
 } from '../../src/sources';
 
-const QUICK_TAGS = ['Fantasy', 'Isekai', 'Action', 'Adventure', 'Romance', 'Cultivation', 'Sci-Fi'];
+const QUICK_TAGS = ['Fantasy', 'Action', 'Adventure', 'Comedy', 'Drama', 'Eastern', 'Harem', 'Romance'];
 const LOCAL_SEARCH_TIMEOUT_MS = 15000;
 
 const PROVIDER_CHIPS: { id: SearchProviderId; label: string }[] = [
@@ -94,6 +98,29 @@ function normalizeNovelStatus(rawStatus?: string): 'Ongoing' | 'Completed' | 'Hi
   return 'Ongoing';
 }
 
+function mapSearchItem(
+  source: Source,
+  providerId: SearchProviderId,
+  item: SearchItem
+): UnifiedSearchResult {
+  const normTitle = normalizeSearchTitle(item.title);
+  const normPath = item.path.trim();
+  return {
+    key: `${source.id}:${normPath}`,
+    provider: providerId,
+    sourceName: source.name,
+    title: item.title,
+    displayTitle: item.title,
+    isMtl: false,
+    path: normPath,
+    url: toAbsoluteUrl(normPath, source.site),
+    domain: extractSourceDomain(source),
+    cover: item.cover,
+    author: item.author,
+    normalizedTitle: normTitle,
+  };
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -110,6 +137,86 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
       }
     );
   });
+}
+
+// ==========================================
+// Recommended (listing) helpers
+// ==========================================
+
+const LISTING_TABS: { kind: ListingKind; label: string }[] = [
+  { kind: 'hot', label: 'Hot' },
+  { kind: 'popular', label: 'Popular' },
+  { kind: 'latest', label: 'Latest' },
+];
+
+const RECOMMEND_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+function recommendCacheKey(sourceId: string, tab: ListingKind): string {
+  return `paper:recommend:${sourceId}:${tab}`;
+}
+
+async function readRecommendCache(
+  sourceId: string,
+  tab: ListingKind
+): Promise<UnifiedSearchResult[] | null> {
+  try {
+    const raw = await AsyncStorage.getItem(recommendCacheKey(sourceId, tab));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.savedAt !== 'number' || !Array.isArray(parsed.items)) {
+      return null;
+    }
+    if (Date.now() - parsed.savedAt > RECOMMEND_CACHE_TTL_MS) return null;
+    return parsed.items as UnifiedSearchResult[];
+  } catch {
+    return null;
+  }
+}
+
+async function writeRecommendCache(
+  sourceId: string,
+  tab: ListingKind,
+  items: UnifiedSearchResult[]
+): Promise<void> {
+  try {
+    await AsyncStorage.setItem(
+      recommendCacheKey(sourceId, tab),
+      JSON.stringify({ savedAt: Date.now(), items })
+    );
+  } catch {
+    // Cache writes are best-effort; never surface errors.
+  }
+}
+
+/**
+ * Interleave one item from each source in turn (round-robin), de-duplicating
+ * by normalized title so a novel shared across sources appears once.
+ */
+function interleaveByProvider(
+  perProvider: Partial<Record<SearchProviderId, UnifiedSearchResult[]>>
+): UnifiedSearchResult[] {
+  const lists = PROVIDER_CHIPS.map((chip) => perProvider[chip.id] || []).filter(
+    (list) => list.length > 0
+  );
+  const out: UnifiedSearchResult[] = [];
+  const seen = new Set<string>();
+  let index = 0;
+  let addedAny = true;
+  while (addedAny) {
+    addedAny = false;
+    for (const list of lists) {
+      if (index < list.length) {
+        addedAny = true;
+        const item = list[index];
+        if (!seen.has(item.normalizedTitle)) {
+          seen.add(item.normalizedTitle);
+          out.push(item);
+        }
+      }
+    }
+    index += 1;
+  }
+  return out;
 }
 
 // ==========================================
@@ -352,10 +459,11 @@ function ProviderStatusStrip({
 }
 
 interface QuickGenrePillsProps {
+  selectedGenre: string | null;
   onSelectGenre: (genre: string) => void;
 }
 
-function QuickGenrePills({ onSelectGenre }: QuickGenrePillsProps) {
+function QuickGenrePills({ selectedGenre, onSelectGenre }: QuickGenrePillsProps) {
   return (
     <View style={styles.tagsContainer}>
       <Text style={styles.tagsLabel}>POPULAR GENRES</Text>
@@ -365,12 +473,28 @@ function QuickGenrePills({ onSelectGenre }: QuickGenrePillsProps) {
         keyboardShouldPersistTaps="handled"
         data={QUICK_TAGS}
         keyExtractor={(item) => item}
+        extraData={selectedGenre}
         contentContainerStyle={styles.tagsList}
-        renderItem={({ item }) => (
-          <Pressable style={styles.tagChip} onPress={() => onSelectGenre(item)}>
-            <Text style={styles.tagChipText}>{item}</Text>
-          </Pressable>
-        )}
+        renderItem={({ item }) => {
+          const isSelected = selectedGenre === item;
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ selected: isSelected }}
+              style={[styles.tagChip, isSelected && styles.tagChipSelected]}
+              onPress={() => onSelectGenre(item)}
+            >
+              <Text
+                style={[
+                  styles.tagChipText,
+                  isSelected && styles.tagChipTextSelected,
+                ]}
+              >
+                {item}
+              </Text>
+            </Pressable>
+          );
+        }}
       />
     </View>
   );
@@ -379,9 +503,34 @@ function QuickGenrePills({ onSelectGenre }: QuickGenrePillsProps) {
 interface ExternalResultCardProps {
   item: UnifiedSearchResult;
   onPress: (item: UnifiedSearchResult) => void;
+  variant?: 'list' | 'grid';
 }
 
-function ExternalResultCard({ item, onPress }: ExternalResultCardProps) {
+function ExternalResultCard({ item, onPress, variant = 'list' }: ExternalResultCardProps) {
+  if (variant === 'grid') {
+    return (
+      <Pressable
+        style={({ pressed }) => [styles.gridCard, pressed && styles.cardPressed]}
+        onPress={() => onPress(item)}
+        accessibilityRole="button"
+      >
+        <Image
+          source={item.cover ? { uri: item.cover } : require('../../assets/icon.png')}
+          style={styles.gridCardCover}
+          resizeMode="cover"
+        />
+        <Text style={styles.gridCardTitle} numberOfLines={2}>
+          {item.displayTitle}
+        </Text>
+        <View style={styles.sourceNameBadge}>
+          <Text style={styles.sourceNameBadgeText} numberOfLines={1}>
+            {item.sourceName}
+          </Text>
+        </View>
+      </Pressable>
+    );
+  }
+
   return (
     <Pressable
       style={({ pressed }) => [styles.resultCard, pressed && styles.cardPressed]}
@@ -446,6 +595,7 @@ function ExternalResultCard({ item, onPress }: ExternalResultCardProps) {
 export default function DiscoverScreen() {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
   const [selectedProviders, setSelectedProviders] = useState<SearchProviderId[]>([
     'readnovelfull',
     'novelfull',
@@ -459,6 +609,22 @@ export default function DiscoverScreen() {
   const [resultsByProvider, setResultsByProvider] = useState<
     Partial<Record<SearchProviderId, UnifiedSearchResult[]>>
   >({});
+
+  // Genre listing state
+  const [genrePage, setGenrePage] = useState(1);
+  const [genreLoadingMore, setGenreLoadingMore] = useState(false);
+
+  // Recommended (listing) state
+  const [recommendedTab, setRecommendedTab] = useState<ListingKind>('hot');
+  const [recommendByProvider, setRecommendByProvider] = useState<
+    Partial<Record<SearchProviderId, UnifiedSearchResult[]>>
+  >({});
+  const [recommendStatuses, setRecommendStatuses] = useState<
+    Partial<Record<SearchProviderId, ProviderSearchState>>
+  >({});
+  const [recommendLoading, setRecommendLoading] = useState(true);
+  const [recommendLoadingMore, setRecommendLoadingMore] = useState(false);
+  const [recommendRefreshing, setRecommendRefreshing] = useState(false);
 
   const [searching, setSearching] = useState(false);
   const [serverProgress, setServerProgress] = useState(0);
@@ -502,6 +668,17 @@ export default function DiscoverScreen() {
   const suppressNextDebounceRef = useRef<boolean>(false);
   const lastSubmittedQueryRef = useRef<string>('');
   const selectedProvidersRef = useRef<SearchProviderId[]>(selectedProviders);
+  // Mirrors resultsByProvider so genre appends can dedupe & count synchronously
+  const resultsByProviderRef = useRef<
+    Partial<Record<SearchProviderId, UnifiedSearchResult[]>>
+  >({});
+  // Recommended (listing) refs
+  const recommendRunIdRef = useRef(0);
+  const recommendByProviderRef = useRef<
+    Partial<Record<SearchProviderId, UnifiedSearchResult[]>>
+  >({});
+  const recommendPageRef = useRef(1);
+  const recommendedTabRef = useRef<ListingKind>('hot');
 
   useEffect(() => {
     selectedProvidersRef.current = selectedProviders;
@@ -601,7 +778,6 @@ export default function DiscoverScreen() {
         // Dedupe by normalized title within the same source only
         const seenTitles = new Set<string>();
         const seenPaths = new Set<string>();
-        const domain = extractSourceDomain(source);
         const mapped: UnifiedSearchResult[] = [];
 
         for (const item of rawItems) {
@@ -613,20 +789,7 @@ export default function DiscoverScreen() {
           seenTitles.add(normTitle);
           seenPaths.add(normPath);
 
-          mapped.push({
-            key: `${source.id}:${normPath}`,
-            provider: providerId,
-            sourceName: source.name,
-            title: item.title,
-            displayTitle: item.title,
-            isMtl: false,
-            path: normPath,
-            url: toAbsoluteUrl(normPath, source.site),
-            domain,
-            cover: item.cover,
-            author: item.author,
-            normalizedTitle: normTitle,
-          });
+          mapped.push(mapSearchItem(source, providerId, item));
         }
 
         setResultsByProvider((prev) => ({
@@ -643,6 +806,66 @@ export default function DiscoverScreen() {
         setProviderStatuses((prev) => ({
           ...prev,
           [providerId]: { status: 'error', count: 0, error: msg },
+        }));
+      } finally {
+        if (searchRunIdRef.current === currentRunId) {
+          markGlobalDoneIfFinished();
+        }
+      }
+    },
+    []
+  );
+
+  const runGenreProvider = useCallback(
+    async (
+      source: Source,
+      genre: string,
+      page: number,
+      currentRunId: number,
+      markGlobalDoneIfFinished: () => void
+    ) => {
+      const providerId = source.id as SearchProviderId;
+      setProviderStatuses((prev) => ({
+        ...prev,
+        [providerId]: { status: 'loading', count: prev[providerId]?.count || 0 },
+      }));
+
+      try {
+        const rawItems = await withTimeout(
+          source.getByGenre(genre, page),
+          LOCAL_SEARCH_TIMEOUT_MS,
+          source.name
+        );
+
+        if (searchRunIdRef.current !== currentRunId) return;
+
+        const mapped = rawItems
+          .map((item) => mapSearchItem(source, providerId, item))
+          .filter((it) => it.normalizedTitle && it.path);
+
+        // Append to any existing page results, deduping by normalized title
+        const prevList = resultsByProviderRef.current[providerId] || [];
+        const seen = new Set(prevList.map((r) => r.normalizedTitle));
+        const additions = mapped.filter((m) => !seen.has(m.normalizedTitle));
+        const nextList = [...prevList, ...additions];
+        const nextMap = { ...resultsByProviderRef.current, [providerId]: nextList };
+        resultsByProviderRef.current = nextMap;
+        setResultsByProvider(nextMap);
+
+        setProviderStatuses((prev) => ({
+          ...prev,
+          [providerId]: { status: 'done', count: nextList.length },
+        }));
+      } catch (err: any) {
+        if (searchRunIdRef.current !== currentRunId) return;
+        const msg = err?.message || 'Genre load failed';
+        setProviderStatuses((prev) => ({
+          ...prev,
+          [providerId]: {
+            status: 'error',
+            count: prev[providerId]?.count || 0,
+            error: msg,
+          },
         }));
       } finally {
         if (searchRunIdRef.current === currentRunId) {
@@ -850,6 +1073,7 @@ export default function DiscoverScreen() {
       setHasSearched(true);
       setLastSearchedQuery(trimmed);
       setResultsByProvider({});
+      resultsByProviderRef.current = {};
 
       const initialStatuses: Partial<Record<SearchProviderId, ProviderSearchState>> = {};
       for (const pid of activeProviders) {
@@ -885,6 +1109,259 @@ export default function DiscoverScreen() {
     },
     [stopActiveSearch, runLocalProvider, runLncrawlProvider]
   );
+
+  // Load a genre listing from all selected sources (never calls search()).
+  // page 1 resets results; later pages append and dedupe by normalized title.
+  const runGenreSearch = useCallback(
+    async (genre: string, page: number, append: boolean) => {
+      const activeProviders = selectedProvidersRef.current;
+      if (activeProviders.length === 0) {
+        if (!append) {
+          setErrorMessage('Select at least one source chip above to load a genre.');
+        }
+        return;
+      }
+
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      if (!append) {
+        stopActiveSearch();
+      }
+      const currentRunId = searchRunIdRef.current;
+
+      if (!append) {
+        lastSubmittedQueryRef.current = '';
+        resultsByProviderRef.current = {};
+        setSearchQuery('');
+        setResultsByProvider({});
+        setProviderStatuses({});
+        setErrorMessage(null);
+        setHasSearched(true);
+        setLastSearchedQuery(genre);
+        setSearching(true);
+        setGenreLoadingMore(false);
+      } else {
+        setGenreLoadingMore(true);
+      }
+      setGenrePage(page);
+
+      let remaining = activeProviders.length;
+      const markProviderFinished = () => {
+        if (searchRunIdRef.current !== currentRunId) return;
+        remaining = Math.max(0, remaining - 1);
+        if (remaining === 0) {
+          setSearching(false);
+          setGenreLoadingMore(false);
+        }
+      };
+
+      const tasks: Promise<void>[] = [];
+      for (const pid of activeProviders) {
+        const source = getSource(pid);
+        if (source) {
+          tasks.push(runGenreProvider(source, genre, page, currentRunId, markProviderFinished));
+        } else {
+          markProviderFinished();
+        }
+      }
+
+      await Promise.allSettled(tasks);
+    },
+    [stopActiveSearch, runGenreProvider]
+  );
+
+  const getSelectedLocalSources = useCallback(
+    () =>
+      selectedProvidersRef.current
+        .map((id) => getSource(id))
+        .filter((s): s is Source => Boolean(s)),
+    []
+  );
+
+  // Load one source's listing page for the Recommended section.
+  const runRecommendProvider = useCallback(
+    async (
+      source: Source,
+      tab: ListingKind,
+      page: number,
+      currentRunId: number,
+      append: boolean,
+      markDone: () => void
+    ) => {
+      const providerId = source.id as SearchProviderId;
+      setRecommendStatuses((prev) => ({
+        ...prev,
+        [providerId]: { status: 'loading', count: prev[providerId]?.count || 0 },
+      }));
+
+      try {
+        const rawItems = await withTimeout(
+          source.getListing(tab, page),
+          LOCAL_SEARCH_TIMEOUT_MS,
+          source.name
+        );
+
+        if (recommendRunIdRef.current !== currentRunId) return;
+
+        const mapped = rawItems
+          .map((item) => mapSearchItem(source, providerId, item))
+          .filter((it) => it.normalizedTitle && it.path);
+
+        const prevList = append ? recommendByProviderRef.current[providerId] || [] : [];
+        const seen = new Set(prevList.map((r) => r.normalizedTitle));
+        const additions = mapped.filter((m) => !seen.has(m.normalizedTitle));
+        const nextList = append ? [...prevList, ...additions] : additions;
+
+        const nextMap = { ...recommendByProviderRef.current, [providerId]: nextList };
+        recommendByProviderRef.current = nextMap;
+        setRecommendByProvider(nextMap);
+
+        writeRecommendCache(providerId, tab, nextList);
+
+        setRecommendStatuses((prev) => ({
+          ...prev,
+          [providerId]: { status: 'done', count: nextList.length },
+        }));
+      } catch (err: any) {
+        if (recommendRunIdRef.current !== currentRunId) return;
+        setRecommendStatuses((prev) => ({
+          ...prev,
+          [providerId]: {
+            status: 'error',
+            count: prev[providerId]?.count || 0,
+            error: err?.message || 'Failed',
+          },
+        }));
+      } finally {
+        if (recommendRunIdRef.current === currentRunId) markDone();
+      }
+    },
+    []
+  );
+
+  const fetchRecommendInto = useCallback(
+    async (tab: ListingKind, page: number, append: boolean, runId: number) => {
+      const sources = getSelectedLocalSources();
+      if (sources.length === 0) {
+        setRecommendLoading(false);
+        setRecommendLoadingMore(false);
+        setRecommendRefreshing(false);
+        return;
+      }
+
+      let remaining = sources.length;
+      const markDone = () => {
+        if (recommendRunIdRef.current !== runId) return;
+        remaining = Math.max(0, remaining - 1);
+        if (remaining === 0) {
+          setRecommendLoading(false);
+          setRecommendLoadingMore(false);
+          setRecommendRefreshing(false);
+        }
+      };
+
+      const tasks = sources.map((source) =>
+        runRecommendProvider(source, tab, page, runId, append, markDone)
+      );
+      await Promise.allSettled(tasks);
+    },
+    [getSelectedLocalSources, runRecommendProvider]
+  );
+
+  // Show cached results immediately, then refresh page 1 from the network.
+  const loadRecommendedInitial = useCallback(
+    async (tab: ListingKind) => {
+      const sources = getSelectedLocalSources();
+      const runId = ++recommendRunIdRef.current;
+      recommendPageRef.current = 1;
+
+      if (sources.length === 0) {
+        recommendByProviderRef.current = {};
+        setRecommendByProvider({});
+        setRecommendStatuses({});
+        setRecommendLoading(false);
+        return;
+      }
+
+      recommendByProviderRef.current = {};
+      setRecommendByProvider({});
+      setRecommendStatuses({});
+      setRecommendLoading(true);
+
+      const cached = await Promise.all(
+        sources.map((source) => readRecommendCache(source.id, tab))
+      );
+      if (recommendRunIdRef.current !== runId) return;
+
+      const cacheMap: Partial<Record<SearchProviderId, UnifiedSearchResult[]>> = {};
+      const cacheStatuses: Partial<Record<SearchProviderId, ProviderSearchState>> = {};
+      sources.forEach((source, i) => {
+        const pid = source.id as SearchProviderId;
+        const items = cached[i];
+        if (items && items.length > 0) {
+          cacheMap[pid] = items;
+          cacheStatuses[pid] = { status: 'done', count: items.length };
+        }
+      });
+      recommendByProviderRef.current = cacheMap;
+      setRecommendByProvider(cacheMap);
+      setRecommendStatuses(cacheStatuses);
+
+      await fetchRecommendInto(tab, 1, false, runId);
+    },
+    [getSelectedLocalSources, fetchRecommendInto]
+  );
+
+  const handleSelectRecommendTab = useCallback((tab: ListingKind) => {
+    if (tab === recommendedTabRef.current) return;
+    recommendedTabRef.current = tab;
+    setRecommendedTab(tab);
+  }, []);
+
+  const handleRecommendRefresh = useCallback(async () => {
+    const tab = recommendedTabRef.current;
+    const runId = ++recommendRunIdRef.current;
+    recommendPageRef.current = 1;
+    setRecommendRefreshing(true);
+    setRecommendLoading(true);
+    setRecommendStatuses({});
+    await fetchRecommendInto(tab, 1, false, runId);
+  }, [fetchRecommendInto]);
+
+  const handleRecommendLoadMore = useCallback(async () => {
+    if (recommendLoadingMore || recommendLoading) return;
+    const tab = recommendedTabRef.current;
+    const nextPage = recommendPageRef.current + 1;
+    const runId = recommendRunIdRef.current;
+    recommendPageRef.current = nextPage;
+    setRecommendLoadingMore(true);
+    await fetchRecommendInto(tab, nextPage, true, runId);
+  }, [fetchRecommendInto, recommendLoadingMore, recommendLoading]);
+
+  const handleRetryRecommendProvider = useCallback(
+    async (providerId: SearchProviderId) => {
+      const source = getSource(providerId);
+      if (!source) return;
+      const tab = recommendedTabRef.current;
+      const page = recommendPageRef.current;
+      const runId = recommendRunIdRef.current;
+      await runRecommendProvider(source, tab, page, runId, page > 1, () => {});
+    },
+    [runRecommendProvider]
+  );
+
+  const showRecommended = searchQuery.trim().length === 0 && !selectedGenre;
+
+  // Load recommendations whenever the Recommended section is visible, the tab
+  // changes, or the selected sources change.
+  useEffect(() => {
+    if (!providersLoaded) return;
+    if (!showRecommended) return;
+    loadRecommendedInitial(recommendedTab);
+  }, [providersLoaded, showRecommended, recommendedTab, selectedProviders, loadRecommendedInitial]);
 
   const handleRetrySingleProvider = useCallback(
     async (providerId: SearchProviderId) => {
@@ -964,9 +1441,29 @@ export default function DiscoverScreen() {
 
   const handleSelectGenre = (genre: string) => {
     Keyboard.dismiss();
-    suppressNextDebounceRef.current = true;
-    setSearchQuery(genre);
-    runLiveSearch(genre, true);
+    if (selectedGenre === genre) {
+      // Tapping the selected pill again clears the selection & results
+      setSelectedGenre(null);
+      handleClearSearch();
+      return;
+    }
+    setSelectedGenre(genre);
+    runGenreSearch(genre, 1, false);
+  };
+
+  const handleLoadMore = () => {
+    if (!selectedGenre || genreLoadingMore || searching) return;
+    runGenreSearch(selectedGenre, genrePage + 1, true);
+  };
+
+  // Typing in the search box exits genre mode and runs a normal title search.
+  const handleSearchQueryChange = (text: string) => {
+    if (selectedGenre) {
+      setSelectedGenre(null);
+      setGenreLoadingMore(false);
+      setGenrePage(1);
+    }
+    setSearchQuery(text);
   };
 
   const handleClearSearch = () => {
@@ -976,6 +1473,7 @@ export default function DiscoverScreen() {
     }
     stopActiveSearch();
     lastSubmittedQueryRef.current = '';
+    resultsByProviderRef.current = {};
     setSearchQuery('');
     setSearching(false);
     setServerProgress(0);
@@ -984,6 +1482,9 @@ export default function DiscoverScreen() {
     setResultsByProvider({});
     setProviderStatuses({});
     setErrorMessage(null);
+    setSelectedGenre(null);
+    setGenrePage(1);
+    setGenreLoadingMore(false);
   };
 
   const importLocalNovel = useCallback(
@@ -1195,6 +1696,12 @@ export default function DiscoverScreen() {
     return merged;
   }, [resultsByProvider]);
 
+  // Recommended list: interleave one item from each source, dedupe by title.
+  const recommendList = useMemo(
+    () => interleaveByProvider(recommendByProvider),
+    [recommendByProvider]
+  );
+
   const renderEmptyComponent = () => {
     if (searching) {
       return (
@@ -1233,6 +1740,41 @@ export default function DiscoverScreen() {
     }
 
     return null;
+  };
+
+  const renderRecommendSkeleton = () => (
+    <View>
+      {[0, 1, 2].map((row) => (
+        <View key={row} style={styles.gridRow}>
+          <View style={styles.skeletonCard} />
+          <View style={styles.skeletonCard} />
+        </View>
+      ))}
+    </View>
+  );
+
+  const renderRecommendEmpty = () => {
+    const hasSources = selectedProviders.some((id) => Boolean(getSource(id)));
+    if (!hasSources) {
+      return (
+        <View style={styles.emptyStateBox}>
+          <Ionicons name="library-outline" size={44} color={Colors.surfaceLight} />
+          <Text style={styles.emptyStateTitle}>No sources selected</Text>
+          <Text style={styles.emptyStateSub}>
+            Enable at least one source chip above to load recommendations.
+          </Text>
+        </View>
+      );
+    }
+    return (
+      <View style={styles.emptyStateBox}>
+        <Ionicons name="star-outline" size={44} color={Colors.surfaceLight} />
+        <Text style={styles.emptyStateTitle}>No recommendations</Text>
+        <Text style={styles.emptyStateSub}>
+          Pull down to refresh or try another tab.
+        </Text>
+      </View>
+    );
   };
 
   return (
@@ -1275,7 +1817,7 @@ export default function DiscoverScreen() {
         <SearchBar
           value={searchQuery}
           loading={searching}
-          onChangeText={setSearchQuery}
+          onChangeText={handleSearchQueryChange}
           onClear={handleClearSearch}
           onSubmit={handleSubmitSearch}
         />
@@ -1292,15 +1834,20 @@ export default function DiscoverScreen() {
           </View>
         )}
 
-        <ProviderStatusStrip
-          selectedProviders={selectedProviders}
-          statuses={providerStatuses}
-          onRetryProvider={handleRetrySingleProvider}
+        {!showRecommended && (
+          <ProviderStatusStrip
+            selectedProviders={selectedProviders}
+            statuses={providerStatuses}
+            onRetryProvider={handleRetrySingleProvider}
+          />
+        )}
+
+        <QuickGenrePills
+          selectedGenre={selectedGenre}
+          onSelectGenre={handleSelectGenre}
         />
 
-        <QuickGenrePills onSelectGenre={handleSelectGenre} />
-
-        {errorMessage && (
+        {!showRecommended && errorMessage && (
           <View style={styles.errorBanner}>
             <Ionicons name="alert-circle" size={18} color={Colors.warning} />
             <Text style={styles.errorText}>{errorMessage}</Text>
@@ -1317,7 +1864,7 @@ export default function DiscoverScreen() {
           </View>
         )}
 
-        {(combinedResults.length > 0 || searching) && (
+        {!showRecommended && (combinedResults.length > 0 || searching) && (
           <View style={styles.resultsCountRow}>
             <Text style={styles.resultsCountText}>
               {searching
@@ -1328,16 +1875,119 @@ export default function DiscoverScreen() {
         )}
       </View>
 
-      <FlatList
-        data={combinedResults}
-        keyExtractor={(item) => item.key}
-        renderItem={({ item }) => (
-          <ExternalResultCard item={item} onPress={handleOpenSearchResult} />
-        )}
-        ListEmptyComponent={renderEmptyComponent}
-        contentContainerStyle={styles.listContent}
-        keyboardShouldPersistTaps="handled"
-      />
+      {showRecommended ? (
+        <FlatList
+          data={recommendList}
+          keyExtractor={(item) => item.key}
+          numColumns={2}
+          columnWrapperStyle={styles.gridRow}
+          renderItem={({ item }) => (
+            <ExternalResultCard item={item} variant="grid" onPress={handleOpenSearchResult} />
+          )}
+          ListHeaderComponent={
+            <View>
+              <View style={styles.recommendHeaderRow}>
+                <Text style={styles.recommendTitle}>Recommended</Text>
+                {recommendLoading && recommendList.length > 0 && (
+                  <ActivityIndicator size="small" color={Colors.primary} />
+                )}
+              </View>
+              <View style={styles.recommendTabsRow}>
+                {LISTING_TABS.map((t) => {
+                  const active = recommendedTab === t.kind;
+                  return (
+                    <Pressable
+                      key={t.kind}
+                      accessibilityRole="tab"
+                      accessibilityState={{ selected: active }}
+                      style={[styles.recommendTab, active && styles.recommendTabActive]}
+                      onPress={() => handleSelectRecommendTab(t.kind)}
+                    >
+                      <Text
+                        style={[
+                          styles.recommendTabText,
+                          active && styles.recommendTabTextActive,
+                        ]}
+                      >
+                        {t.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <ProviderStatusStrip
+                selectedProviders={selectedProviders}
+                statuses={recommendStatuses}
+                onRetryProvider={handleRetryRecommendProvider}
+              />
+            </View>
+          }
+          ListEmptyComponent={
+            recommendLoading && recommendList.length === 0
+              ? renderRecommendSkeleton()
+              : renderRecommendEmpty()
+          }
+          ListFooterComponent={
+            recommendList.length > 0 ? (
+              <Pressable
+                style={[styles.loadMoreBtn, recommendLoadingMore && styles.loadMoreBtnDisabled]}
+                onPress={handleRecommendLoadMore}
+                disabled={recommendLoadingMore}
+                accessibilityRole="button"
+              >
+                {recommendLoadingMore ? (
+                  <ActivityIndicator size="small" color="#0D0F14" />
+                ) : (
+                  <>
+                    <Text style={styles.loadMoreText}>Load more</Text>
+                    <Ionicons name="chevron-down" size={16} color="#0D0F14" />
+                  </>
+                )}
+              </Pressable>
+            ) : null
+          }
+          contentContainerStyle={styles.recommendContent}
+          refreshControl={
+            <RefreshControl
+              refreshing={recommendRefreshing}
+              onRefresh={handleRecommendRefresh}
+              tintColor={Colors.primary}
+              colors={[Colors.primary]}
+            />
+          }
+          keyboardShouldPersistTaps="handled"
+        />
+      ) : (
+        <FlatList
+          data={combinedResults}
+          keyExtractor={(item) => item.key}
+          renderItem={({ item }) => (
+            <ExternalResultCard item={item} onPress={handleOpenSearchResult} />
+          )}
+          ListEmptyComponent={renderEmptyComponent}
+          ListFooterComponent={
+            selectedGenre && combinedResults.length > 0 ? (
+              <Pressable
+                style={[styles.loadMoreBtn, genreLoadingMore && styles.loadMoreBtnDisabled]}
+                onPress={handleLoadMore}
+                disabled={genreLoadingMore}
+                accessibilityRole="button"
+              >
+                {genreLoadingMore ? (
+                  <ActivityIndicator size="small" color="#0D0F14" />
+                ) : (
+                  <>
+                    <Text style={styles.loadMoreText}>Load more</Text>
+                    <Ionicons name="chevron-down" size={16} color="#0D0F14" />
+                  </>
+                )}
+              </Pressable>
+            ) : null
+          }
+          contentContainerStyle={styles.listContent}
+          keyboardShouldPersistTaps="handled"
+        />
+      )}
 
       {/* Add by Link Modal */}
       <Modal
@@ -1814,6 +2464,14 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     fontWeight: '500',
   },
+  tagChipSelected: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  tagChipTextSelected: {
+    color: '#0D0F14',
+    fontWeight: '700',
+  },
   errorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1849,6 +2507,105 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: Colors.textMuted,
+  },
+  loadMoreBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: Colors.primary,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  loadMoreBtnDisabled: {
+    opacity: 0.7,
+  },
+  loadMoreText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0D0F14',
+  },
+  recommendContent: {
+    paddingHorizontal: 12,
+    paddingBottom: 40,
+  },
+  recommendHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+    marginBottom: 10,
+  },
+  recommendTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: Colors.text,
+    letterSpacing: -0.3,
+  },
+  recommendTabsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 4,
+    marginBottom: 12,
+  },
+  recommendTab: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  recommendTabActive: {
+    backgroundColor: Colors.primaryMuted,
+    borderColor: Colors.primary,
+  },
+  recommendTabText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: Colors.textSecondary,
+  },
+  recommendTabTextActive: {
+    color: Colors.primary,
+    fontWeight: '700',
+  },
+  gridRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  gridCard: {
+    flex: 1,
+    marginBottom: 12,
+    backgroundColor: Colors.surface,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    overflow: 'hidden',
+    padding: 8,
+  },
+  gridCardCover: {
+    width: '100%',
+    height: 150,
+    borderRadius: 6,
+    backgroundColor: Colors.surfaceLight,
+  },
+  gridCardTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: Colors.text,
+    marginTop: 8,
+    marginBottom: 6,
+    minHeight: 36,
+  },
+  skeletonCard: {
+    flex: 1,
+    height: 210,
+    borderRadius: 10,
+    backgroundColor: Colors.surface,
+    marginBottom: 12,
   },
   resultCard: {
     flexDirection: 'row',

@@ -89,7 +89,7 @@ export default function LibraryScreen() {
       <View style={styles.brandRow}>
         <View style={styles.brandTitleContainer}>
           <Text style={styles.brandTitle}>Paper</Text>
-          <Text style={styles.brandBadge}>v2.10</Text>
+          <Text style={styles.brandBadge}>v3.0</Text>
         </View>
         <Pressable
           style={styles.searchIconButton}

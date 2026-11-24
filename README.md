@@ -1,28 +1,38 @@
-# Paper - Expo Router TypeScript reader
+# Paper - Light Novel Reader
 
-Complete Expo Router project (SDK 58). Files preserved from the original archive:
-library screen (app/index.tsx), reader screen (app/reader/[id].tsx),
-sample novels (data/novels.ts), settings/scroll storage (utils/storage.ts).
+A React Native (Expo) light novel reader for Android with offline downloads, built-in reader and reading progress. Version 2.10.0.
 
-## Run on your Android phone (no PC)
+## Stack
 
-1. Install the free **Expo Go** app from the Play Store.
-2. On Replit/Codespaces: unzip this zip, then run `npm install` then `npx expo start`.
-3. Scan the QR code with Expo Go. Your phone and the workspace must be on the
-   same network (or use `npx expo start --tunnel` for a public link).
+- Expo SDK ~52.0.37, React Native 0.76.9, React 18.3.1, expo-router 4.0 (file-based routing)
+- TypeScript, SQLite via expo-sqlite, file storage via expo-file-system
+- Android package: `com.mksev3n.paper` (app.json), scheme `paper`, dark UI, versionCode 3
 
-## Notes
+## Features
 
-- Entry is `expo-router/entry` (package.json "main"). babel.config.js uses
-  `babel-preset-expo` (installed as devDependency) for expo-router transforms.
-- app.json: scheme `paper`, android package `com.paper.reader`, dark UI.
-- Verify with `npm run typecheck` and `npx expo export --platform android`.
-- To export a standalone APK later, use EAS Build: `npx eas build --platform android`.
+- **Discover / Search**: browse live catalog and paste a novel URL to add directly
+- **Direct sources (scraped client-side, no backend needed)**: ReadNovelFull, NovelFull, NovelBin (`src/sources/readnovelfull.ts`, `src/sources/index.ts`)
+- **Backend catalog**: Incrawl / LNCrawl-compatible API at `https://lightnovel-crawler-vit0.onrender.com` (set in `src/config.ts` as `LNCRAWL_API_BASE` / `API_URL`, change it to point at any LNCrawl-compatible backend)
+- **Offline downloads**: chapter text stored in a local SQLite database (expo-sqlite), readable fully offline in the built-in reader with local reading progress (`src/services/database.ts`, `src/services/downloadManager.ts`)
+- **Local storage**: novels, chapters and reading progress in SQLite; covers and exports kept in the app-private document directory, never in public Downloads (`src/services/fileStorage.ts`)
+- **Reader**: built-in reader screen with scroll progress tracking (`app/reader/[id].tsx`)
+- **Screens**: Discover, Library, Downloads, Settings tabs (`app/(tabs)/`), novel detail (`app/novel/[id].tsx`), reader (`app/reader/[id].tsx`)
 
-## Backend plan
+## Run
 
-You planned to use an **Incrawl** backend as the live API for Paper. This build
-does not call any Incrawl endpoints yet (no docs/credentials provided). Once you
-have the base URL, auth approach and endpoint docs, add them in `lib/api.ts` and
-swap `data/novels.ts` for fetched data; the reader screens already accept the
-same Novel shape.
+1. Install dependencies: `npm install` (or `npm ci` for a clean install)
+2. Start dev server: `npm start` (runs on port 3000) or `npm run android`
+3. On a phone: install the free **Expo Go** app, scan the QR code from `npx expo start`. Phone and dev machine must be on the same network, or use a tunnel (`npx expo start --tunnel`) for a public link.
+4. Verify: `npm run typecheck` (runs `tsc --noEmit`)
+
+## Build Android APK
+
+Use EAS Build: `npx eas build --platform android`. The EAS project is configured in `app.json` (`extra.eas.projectId`). A standalone app.json export bundle can be generated with `npx expo export --platform android`.
+
+## Project layout
+
+- `app/` - expo-router screens (tabs, novel detail, reader)
+- `src/config.ts` - backend URL and app config
+- `src/sources/` - direct source scrapers (ReadNovelFull, NovelFull, NovelBin)
+- `src/services/` - SQLite database, download manager, file storage, LNCrawl client
+- `assets/` - icons and splash

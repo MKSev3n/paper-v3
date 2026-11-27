@@ -10,7 +10,7 @@ import * as Sharing from 'expo-sharing';
 import { Novel, Chapter, DownloadTask } from '../types';
 import { APP_CONFIG } from '../config';
 import { LNCrawlService } from './lncrawl';
-import { getSource, Source } from '../sources';
+import { getSource, Source, SourceBlockedError, SourceHttpError } from '../sources';
 import {
   upsertNovel,
   saveChapter,
@@ -27,6 +27,62 @@ const BATCH_JOB_TIMEOUT_MS = 120000;
 const LOCAL_CONCURRENCY = 2;
 const LOCAL_REQUEST_DELAY_MS = 400;
 const LOCAL_MAX_RETRIES = 2;
+
+interface LocalSourceProfile {
+  /** Max simultaneous chapter requests for this source. */
+  concurrency: number;
+  /** Minimum spacing between request starts (ms) across all workers. */
+  requestDelayMs: number;
+  /** Max automatic retries for transient errors (blocks are never retried). */
+  maxRetries: number;
+}
+
+const DEFAULT_LOCAL_PROFILE: LocalSourceProfile = {
+  concurrency: LOCAL_CONCURRENCY,
+  requestDelayMs: LOCAL_REQUEST_DELAY_MS,
+  maxRetries: LOCAL_MAX_RETRIES,
+};
+
+// Source-specific conservative throttling. ReadNovelFull sits behind Cloudflare
+// and starts returning 200 challenge pages when requests are bursty, so it is
+// fetched one chapter at a time with a longer gap. Other sources are unchanged.
+const SOURCE_LOCAL_PROFILES: Record<string, LocalSourceProfile> = {
+  readnovelfull: { concurrency: 1, requestDelayMs: 1200, maxRetries: LOCAL_MAX_RETRIES },
+};
+
+function getLocalProfile(sourceId?: string): LocalSourceProfile {
+  return (sourceId && SOURCE_LOCAL_PROFILES[sourceId]) || DEFAULT_LOCAL_PROFILE;
+}
+
+function isBlockedError(err: any): boolean {
+  return (
+    err instanceof SourceBlockedError ||
+    err?.name === 'SourceBlockedError' ||
+    err?.status === 403
+  );
+}
+
+/** Turn a raw fetch error into a clear, user-facing chapter failure reason. */
+function describeChapterError(err: any): string {
+  if (!err) return 'Unknown error';
+  if (isBlockedError(err)) {
+    return err?.message || 'Blocked by source (access denied)';
+  }
+  if (err instanceof SourceHttpError || err?.name === 'SourceHttpError') {
+    const status = typeof err?.status === 'number' ? err.status : 0;
+    if (status === 404) return 'Chapter not found (404)';
+    if (status === 429) return 'Rate limited (429) — try again later';
+    if (status === 408) return 'Request timed out';
+    if (status >= 500) return `Server error (${status})`;
+    if (status === 0) {
+      return /timed out|timeout|abort/i.test(err?.message || '')
+        ? 'Request timed out'
+        : 'Network error';
+    }
+    return err?.message || `HTTP ${status}`;
+  }
+  return err?.message || 'Download failed';
+}
 
 function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
@@ -91,10 +147,11 @@ class DownloadManagerService {
   private async fetchLocalChapterWithRetries(
     source: Source,
     chapterPath: string,
-    novelId?: string
+    novelId?: string,
+    profile: LocalSourceProfile = DEFAULT_LOCAL_PROFILE
   ): Promise<string> {
     let lastError: Error | null = null;
-    for (let attempt = 0; attempt <= LOCAL_MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= profile.maxRetries; attempt++) {
       if (novelId && this.cancelFlags.get(novelId)) {
         throw new Error('Download cancelled');
       }
@@ -106,8 +163,17 @@ class DownloadManagerService {
         return text;
       } catch (err: any) {
         lastError = err instanceof Error ? err : new Error(String(err || 'Chapter fetch failed'));
-        if (attempt < LOCAL_MAX_RETRIES) {
-          await new Promise((r) => setTimeout(r, LOCAL_REQUEST_DELAY_MS * (attempt + 1)));
+        // Website blocks (403 / Cloudflare challenge) are never auto-retried;
+        // retrying only makes the source deny access harder. Surface immediately.
+        if (isBlockedError(err)) {
+          throw lastError;
+        }
+        if (attempt < profile.maxRetries) {
+          const backoff = Math.min(
+            2000,
+            profile.requestDelayMs * Math.pow(2, attempt)
+          );
+          await new Promise((r) => setTimeout(r, backoff));
         }
       }
     }
@@ -128,15 +194,18 @@ class DownloadManagerService {
     let nextIndex = 0;
     let cancelled = false;
 
-    // Rate-limit gate ensuring at least 400ms between request starts across both concurrent workers
+    const profile = getLocalProfile(source.id);
+
+    // Rate-limit gate ensuring at least `requestDelayMs` between request starts
+    // across all concurrent workers for this source.
     let lastDispatchAt = 0;
     let gateChain: Promise<void> = Promise.resolve();
 
     const waitForRateLimitSlot = async () => {
       const current = gateChain.then(async () => {
         const elapsed = Date.now() - lastDispatchAt;
-        if (elapsed < LOCAL_REQUEST_DELAY_MS) {
-          await new Promise((r) => setTimeout(r, LOCAL_REQUEST_DELAY_MS - elapsed));
+        if (elapsed < profile.requestDelayMs) {
+          await new Promise((r) => setTimeout(r, profile.requestDelayMs - elapsed));
         }
         lastDispatchAt = Date.now();
       });
@@ -174,7 +243,12 @@ class DownloadManagerService {
           if (!chapterPath) {
             throw new Error('Chapter path is missing.');
           }
-          const content = await this.fetchLocalChapterWithRetries(source, chapterPath, novelId);
+          const content = await this.fetchLocalChapterWithRetries(
+            source,
+            chapterPath,
+            novelId,
+            profile
+          );
           await saveChapter({
             ...chapter,
             provider: source.id,
@@ -190,7 +264,7 @@ class DownloadManagerService {
             cancelled = true;
             return;
           }
-          const msg = chErr?.message || 'Failed to save chapter';
+          const msg = describeChapterError(chErr);
           console.warn(`Failed downloading local chapter ${chapter.id}:`, chErr);
           failedIds.push(chapter.id);
           existingErrors[chapter.id] = msg;
@@ -205,7 +279,7 @@ class DownloadManagerService {
       }
     };
 
-    const workerCount = Math.min(LOCAL_CONCURRENCY, pendingChapters.length);
+    const workerCount = Math.min(profile.concurrency, pendingChapters.length);
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
     return { completed, failedIds, cancelled };
@@ -522,7 +596,12 @@ class DownloadManagerService {
           if (!chPath) {
             throw new Error('Chapter path is missing.');
           }
-          content = await this.fetchLocalChapterWithRetries(localSource, chPath);
+          content = await this.fetchLocalChapterWithRetries(
+            localSource,
+            chPath,
+            undefined,
+            getLocalProfile(localSource.id)
+          );
           fetchedWordCount = countWords(content);
         } else {
           const fetched = await LNCrawlService.fetchChapterContent(chapter.id);
@@ -555,7 +634,7 @@ class DownloadManagerService {
       return updatedChapter;
     } catch (err: any) {
       const currentMap = this.chapterFailuresByNovel.get(novel.id) || {};
-      currentMap[chapter.id] = err?.message || 'Download failed';
+      currentMap[chapter.id] = describeChapterError(err);
       this.chapterFailuresByNovel.set(novel.id, currentMap);
       throw err;
     }

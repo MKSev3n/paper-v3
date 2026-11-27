@@ -28,20 +28,22 @@ export class SourceHttpError extends Error {
   }
 }
 
-function isCloudflareOrBlockPage(status: number, body: string): boolean {
-  if (status === 403 || status === 503) {
-    return true;
-  }
+function isChallengePage(body: string): boolean {
   const lower = body.toLowerCase();
-  if (
+  return (
     lower.includes('just a moment') ||
     lower.includes('cf-challenge') ||
     lower.includes('cf_chl_opt') ||
     lower.includes('checking your browser before accessing')
-  ) {
+  );
+}
+
+function isCloudflareOrBlockPage(status: number, body: string): boolean {
+  // 403/503 are hard blocks; a 200 can still carry a Cloudflare JS challenge page.
+  if (status === 403 || status === 503) {
     return true;
   }
-  return false;
+  return isChallengePage(body);
 }
 
 export async function fetchHtml(url: string, options: FetchHtmlOptions): Promise<string> {
@@ -75,8 +77,11 @@ export async function fetchHtml(url: string, options: FetchHtmlOptions): Promise
       const body = await response.text();
 
       if (isCloudflareOrBlockPage(response.status, body)) {
+        const label = isChallengePage(body)
+          ? 'Cloudflare challenge'
+          : `HTTP ${response.status}`;
         throw new SourceBlockedError(
-          `Blocked by site (${response.status || 'Cloudflare challenge'})`,
+          `Blocked by site (${label})`,
           response.status || 403
         );
       }

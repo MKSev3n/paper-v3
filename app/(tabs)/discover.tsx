@@ -10,7 +10,6 @@ import {
   ActivityIndicator,
   Keyboard,
   Modal,
-  ScrollView,
   RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -29,7 +28,7 @@ import {
   normalizeSearchTitle,
   processSearchResults,
 } from '../../src/services/lncrawl';
-import { API_URL, APP_CONFIG } from '../../src/config';
+import { APP_CONFIG } from '../../src/config';
 import { saveChaptersBatch, upsertNovel } from '../../src/services/database';
 import { getDiscoverProviders, saveDiscoverProviders } from '../../src/services/storage';
 import {
@@ -223,75 +222,79 @@ function interleaveByProvider(
 // TOP-LEVEL SUBCOMPONENTS (prevents keyboard blur/remount)
 // ==========================================
 
-interface StatusBannerProps {
+interface ServerStatusCompactProps {
   serverStatus: ServerStatusState;
   isWaking: boolean;
   onPressAccount: () => void;
   onRetryConnection: () => void;
 }
 
-function ServerStatusBanner({
+// Compact server status: only rendered while waking or when the server is not
+// authenticated. Successful connections render nothing to keep the header clean.
+function ServerStatusCompact({
   serverStatus,
   isWaking,
   onPressAccount,
   onRetryConnection,
-}: StatusBannerProps) {
-  const dotColor = isWaking
-    ? Colors.warning
-    : serverStatus.online && serverStatus.authenticated
-    ? Colors.success
-    : Colors.danger;
-
-  const subtext = isWaking
-    ? 'Waking up server...'
-    : serverStatus.authenticated
-    ? `Connected • ${serverStatus.user?.email || 'Active session'}`
-    : serverStatus.tested
-    ? serverStatus.error || 'Disconnected / Unauthorized'
-    : 'Connecting to server...';
+}: ServerStatusCompactProps) {
+  const showError = serverStatus.tested && !serverStatus.authenticated && !isWaking;
+  if (!isWaking && !showError) return null;
 
   return (
-    <Pressable style={styles.apiStatusCard} onPress={onPressAccount}>
-      <View style={styles.apiStatusLeft}>
-        <View style={[styles.statusDot, { backgroundColor: dotColor }]} />
-        <View style={styles.apiStatusTextGroup}>
-          <Text style={styles.apiStatusText} numberOfLines={1}>
-            {API_URL.replace(/^https?:\/\//, '')}
-          </Text>
-          <Text style={styles.apiAuthSubtext} numberOfLines={1}>
-            {subtext}
-          </Text>
-        </View>
-      </View>
-
-      <View style={styles.apiRightAction}>
-        {serverStatus.tested && !serverStatus.authenticated && !isWaking ? (
+    <View style={[styles.serverCompact, showError && styles.serverCompactError]}>
+      {isWaking ? (
+        <ActivityIndicator size="small" color={Colors.primary} />
+      ) : (
+        <Ionicons name="alert-circle" size={14} color={Colors.danger} />
+      )}
+      <Text
+        style={[styles.serverCompactText, showError && styles.serverCompactTextError]}
+        numberOfLines={1}
+      >
+        {isWaking
+          ? 'Waking up server...'
+          : serverStatus.error || 'Server disconnected / unauthorized'}
+      </Text>
+      <View style={styles.serverCompactActions}>
+        {showError && (
           <Pressable
-            style={styles.bannerRetryBtn}
-            onPress={(e) => {
-              e.stopPropagation();
-              onRetryConnection();
-            }}
-            hitSlop={8}
+            style={styles.serverCompactRetry}
+            onPress={onRetryConnection}
+            hitSlop={6}
           >
-            <Text style={styles.bannerRetryText}>Retry</Text>
+            <Text style={styles.serverCompactRetryText}>Retry</Text>
           </Pressable>
-        ) : (
-          <Text style={styles.apiLatencyText}>
-            {isWaking
-              ? 'Waking...'
-              : serverStatus.tested
-              ? serverStatus.online
-                ? `${serverStatus.latencyMs}ms`
-                : 'Offline'
-              : '...'}
-          </Text>
         )}
-        <Ionicons
-          name={serverStatus.authenticated ? 'person-circle' : 'log-in-outline'}
-          size={18}
-          color={serverStatus.authenticated ? Colors.success : Colors.primary}
-        />
+        <Pressable
+          style={styles.serverCompactAccount}
+          onPress={onPressAccount}
+          hitSlop={6}
+        >
+          <Ionicons name="log-in-outline" size={16} color={Colors.primary} />
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+interface SourcesButtonProps {
+  count: number;
+  onPress: () => void;
+}
+
+// Compact filter button that opens the source picker instead of a full chip row.
+function SourcesButton({ count, onPress }: SourcesButtonProps) {
+  return (
+    <Pressable
+      style={styles.sourcesBtn}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Sources, ${count} selected`}
+    >
+      <Ionicons name="options-outline" size={15} color={Colors.primary} />
+      <Text style={styles.sourcesBtnText}>Sources</Text>
+      <View style={styles.sourcesCountBadge}>
+        <Text style={styles.sourcesCountText}>{count}</Text>
       </View>
     </Pressable>
   );
@@ -344,56 +347,14 @@ function SearchBar({ value, loading, onChangeText, onClear, onSubmit }: SearchBa
   );
 }
 
-interface SourceChipsRowProps {
-  selectedProviders: SearchProviderId[];
-  onToggleProvider: (id: SearchProviderId) => void;
-}
-
-function SourceChipsRow({ selectedProviders, onToggleProvider }: SourceChipsRowProps) {
-  return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      keyboardShouldPersistTaps="handled"
-      contentContainerStyle={styles.providerChipsList}
-    >
-      {PROVIDER_CHIPS.map((chip) => {
-        const isSelected = selectedProviders.includes(chip.id);
-        return (
-          <Pressable
-            key={chip.id}
-            style={[
-              styles.providerChip,
-              isSelected && styles.providerChipSelected,
-            ]}
-            onPress={() => onToggleProvider(chip.id)}
-          >
-            <Ionicons
-              name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
-              size={14}
-              color={isSelected ? Colors.primary : Colors.textMuted}
-            />
-            <Text
-              style={[
-                styles.providerChipText,
-                isSelected && styles.providerChipTextSelected,
-              ]}
-            >
-              {chip.label}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </ScrollView>
-  );
-}
-
 interface ProviderStatusStripProps {
   selectedProviders: SearchProviderId[];
   statuses: Partial<Record<SearchProviderId, ProviderSearchState>>;
   onRetryProvider: (id: SearchProviderId) => void;
 }
 
+// Only surface compact loading indicators and errors. Successful providers and
+// their result counts are intentionally hidden to reduce header clutter.
 function ProviderStatusStrip({
   selectedProviders,
   statuses,
@@ -401,7 +362,11 @@ function ProviderStatusStrip({
 }: ProviderStatusStripProps) {
   const activeEntries = selectedProviders
     .map((id) => ({ id, state: statuses[id] }))
-    .filter((entry) => entry.state && entry.state.status !== 'idle');
+    .filter(
+      (entry) =>
+        entry.state &&
+        (entry.state.status === 'loading' || entry.state.status === 'error')
+    );
 
   if (activeEntries.length === 0) return null;
 
@@ -422,10 +387,8 @@ function ProviderStatusStrip({
           >
             {isLoading ? (
               <ActivityIndicator size="small" color={Colors.primary} />
-            ) : isErr ? (
-              <Ionicons name="alert-circle" size={13} color={Colors.danger} />
             ) : (
-              <Ionicons name="checkmark-circle" size={13} color={Colors.success} />
+              <Ionicons name="alert-circle" size={13} color={Colors.danger} />
             )}
 
             <Text
@@ -437,9 +400,7 @@ function ProviderStatusStrip({
             >
               {isLoading
                 ? `${name}...`
-                : isErr
-                ? `${name}: ${state.error || 'Failed'}`
-                : `${name}: ${state.count}`}
+                : `${name}: ${state.error || 'Failed'}`}
             </Text>
 
             {isErr && (
@@ -463,18 +424,31 @@ interface QuickGenrePillsProps {
   onSelectGenre: (genre: string) => void;
 }
 
+const GENRE_PREVIEW_COUNT = 5;
+
 function QuickGenrePills({ selectedGenre, onSelectGenre }: QuickGenrePillsProps) {
+  const [expanded, setExpanded] = useState(false);
+  const canExpand = QUICK_TAGS.length > GENRE_PREVIEW_COUNT;
+
+  let visibleTags = expanded
+    ? QUICK_TAGS
+    : QUICK_TAGS.slice(0, GENRE_PREVIEW_COUNT);
+  // Keep an off-preview selection visible so the active genre is never hidden.
+  if (selectedGenre && !visibleTags.includes(selectedGenre)) {
+    visibleTags = [selectedGenre, ...visibleTags.slice(0, GENRE_PREVIEW_COUNT - 1)];
+  }
+
   return (
-    <View style={styles.tagsContainer}>
-      <Text style={styles.tagsLabel}>POPULAR GENRES</Text>
+    <View style={styles.genreRow}>
       <FlatList
         horizontal
         showsHorizontalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
-        data={QUICK_TAGS}
+        data={visibleTags}
         keyExtractor={(item) => item}
         extraData={selectedGenre}
-        contentContainerStyle={styles.tagsList}
+        style={styles.genreList}
+        contentContainerStyle={styles.genreListContent}
         renderItem={({ item }) => {
           const isSelected = selectedGenre === item;
           return (
@@ -496,6 +470,21 @@ function QuickGenrePills({ selectedGenre, onSelectGenre }: QuickGenrePillsProps)
           );
         }}
       />
+      {canExpand && (
+        <Pressable
+          style={styles.seeAllBtn}
+          onPress={() => setExpanded((v) => !v)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+        >
+          <Text style={styles.seeAllText}>{expanded ? 'Less' : 'See all'}</Text>
+          <Ionicons
+            name={expanded ? 'chevron-up' : 'chevron-down'}
+            size={13}
+            color={Colors.textMuted}
+          />
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -650,6 +639,9 @@ export default function DiscoverScreen() {
   const [linkModalVisible, setLinkModalVisible] = useState(false);
   const [linkInput, setLinkInput] = useState('');
   const [linkError, setLinkError] = useState<string | null>(null);
+
+  // Sources filter modal state
+  const [sourcesModalVisible, setSourcesModalVisible] = useState(false);
 
   // LNCrawl Auth Modal State
   const [authModalVisible, setAuthModalVisible] = useState(false);
@@ -1047,7 +1039,7 @@ export default function DiscoverScreen() {
 
       const activeProviders = selectedProvidersRef.current;
       if (activeProviders.length === 0) {
-        setErrorMessage('Select at least one source chip above to search.');
+        setErrorMessage('Select at least one source using the Sources button above.');
         return;
       }
 
@@ -1117,7 +1109,7 @@ export default function DiscoverScreen() {
       const activeProviders = selectedProvidersRef.current;
       if (activeProviders.length === 0) {
         if (!append) {
-          setErrorMessage('Select at least one source chip above to load a genre.');
+          setErrorMessage('Select at least one source using the Sources button above to load a genre.');
         }
         return;
       }
@@ -1761,7 +1753,7 @@ export default function DiscoverScreen() {
           <Ionicons name="library-outline" size={44} color={Colors.surfaceLight} />
           <Text style={styles.emptyStateTitle}>No sources selected</Text>
           <Text style={styles.emptyStateSub}>
-            Enable at least one source chip above to load recommendations.
+            Enable at least one source using the Sources button above to load recommendations.
           </Text>
         </View>
       );
@@ -1782,37 +1774,26 @@ export default function DiscoverScreen() {
       {/* Fixed Header & SearchBar kept outside FlatList so TextInput NEVER unmounts */}
       <View style={styles.headerContainer}>
         <View style={styles.titleRow}>
-          <View style={styles.titleTextGroup}>
-            <Text style={styles.screenTitle}>Discover & Search</Text>
-            <Text style={styles.screenSubtitle}>
-              Fast direct source search & optional server crawl
-            </Text>
+          <Text style={styles.screenTitle}>Discover</Text>
+          <View style={styles.titleActions}>
+            <SourcesButton
+              count={selectedProviders.length}
+              onPress={() => setSourcesModalVisible(true)}
+            />
+            <Pressable
+              style={styles.addLinkButton}
+              onPress={() => {
+                setLinkError(null);
+                setLinkModalVisible(true);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Add by link"
+            >
+              <Ionicons name="link-outline" size={16} color={Colors.primary} />
+              <Text style={styles.addLinkButtonText}>Add link</Text>
+            </Pressable>
           </View>
-          <Pressable
-            style={styles.addLinkButton}
-            onPress={() => {
-              setLinkError(null);
-              setLinkModalVisible(true);
-            }}
-          >
-            <Ionicons name="link-outline" size={16} color={Colors.primary} />
-            <Text style={styles.addLinkButtonText}>Add by link</Text>
-          </Pressable>
         </View>
-
-        <SourceChipsRow
-          selectedProviders={selectedProviders}
-          onToggleProvider={handleToggleProvider}
-        />
-
-        {lncrawlSelected && (
-          <ServerStatusBanner
-            serverStatus={serverStatus}
-            isWaking={isWaking}
-            onPressAccount={() => setAuthModalVisible(true)}
-            onRetryConnection={checkServer}
-          />
-        )}
 
         <SearchBar
           value={searchQuery}
@@ -1820,6 +1801,11 @@ export default function DiscoverScreen() {
           onChangeText={handleSearchQueryChange}
           onClear={handleClearSearch}
           onSubmit={handleSubmitSearch}
+        />
+
+        <QuickGenrePills
+          selectedGenre={selectedGenre}
+          onSelectGenre={handleSelectGenre}
         />
 
         {/* Thin server progress bar when Server (slow) is active */}
@@ -1834,6 +1820,15 @@ export default function DiscoverScreen() {
           </View>
         )}
 
+        {lncrawlSelected && (
+          <ServerStatusCompact
+            serverStatus={serverStatus}
+            isWaking={isWaking}
+            onPressAccount={() => setAuthModalVisible(true)}
+            onRetryConnection={checkServer}
+          />
+        )}
+
         {!showRecommended && (
           <ProviderStatusStrip
             selectedProviders={selectedProviders}
@@ -1841,11 +1836,6 @@ export default function DiscoverScreen() {
             onRetryProvider={handleRetrySingleProvider}
           />
         )}
-
-        <QuickGenrePills
-          selectedGenre={selectedGenre}
-          onSelectGenre={handleSelectGenre}
-        />
 
         {!showRecommended && errorMessage && (
           <View style={styles.errorBanner}>
@@ -1877,6 +1867,7 @@ export default function DiscoverScreen() {
 
       {showRecommended ? (
         <FlatList
+          key="recommended-grid"
           data={recommendList}
           keyExtractor={(item) => item.key}
           numColumns={2}
@@ -1959,6 +1950,7 @@ export default function DiscoverScreen() {
         />
       ) : (
         <FlatList
+          key="search-list"
           data={combinedResults}
           keyExtractor={(item) => item.key}
           renderItem={({ item }) => (
@@ -1988,6 +1980,96 @@ export default function DiscoverScreen() {
           keyboardShouldPersistTaps="handled"
         />
       )}
+
+      {/* Sources Filter Modal */}
+      <Modal
+        visible={sourcesModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSourcesModalVisible(false)}
+      >
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => setSourcesModalVisible(false)}
+        >
+          <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Sources</Text>
+              <Pressable
+                onPress={() => setSourcesModalVisible(false)}
+                hitSlop={10}
+              >
+                <Ionicons name="close" size={20} color={Colors.textMuted} />
+              </Pressable>
+            </View>
+
+            <Text style={styles.linkHelperText}>
+              Select which sources to use for search and recommendations.
+            </Text>
+
+            {PROVIDER_CHIPS.map((chip) => {
+              const isSelected = selectedProviders.includes(chip.id);
+              return (
+                <Pressable
+                  key={chip.id}
+                  style={[
+                    styles.sourceOptionRow,
+                    isSelected && styles.sourceOptionRowSelected,
+                  ]}
+                  onPress={() => handleToggleProvider(chip.id)}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: isSelected }}
+                >
+                  <Ionicons
+                    name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                    size={20}
+                    color={isSelected ? Colors.primary : Colors.textMuted}
+                  />
+                  <Text
+                    style={[
+                      styles.sourceOptionText,
+                      isSelected && styles.sourceOptionTextSelected,
+                    ]}
+                  >
+                    {chip.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+
+            {lncrawlSelected && (
+              <Pressable
+                style={styles.sourceAccountRow}
+                onPress={() => {
+                  setSourcesModalVisible(false);
+                  setAuthModalVisible(true);
+                }}
+              >
+                <Ionicons
+                  name={
+                    serverStatus.authenticated ? 'person-circle' : 'log-in-outline'
+                  }
+                  size={18}
+                  color={serverStatus.authenticated ? Colors.success : Colors.primary}
+                />
+                <Text style={styles.sourceAccountText} numberOfLines={1}>
+                  {serverStatus.authenticated
+                    ? serverStatus.user?.email || 'Server account'
+                    : 'Sign in to server'}
+                </Text>
+                <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+              </Pressable>
+            )}
+
+            <Pressable
+              style={styles.loginSubmitBtn}
+              onPress={() => setSourcesModalVisible(false)}
+            >
+              <Text style={styles.loginSubmitText}>Done</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* Add by Link Modal */}
       <Modal
@@ -2227,23 +2309,20 @@ const styles = StyleSheet.create({
   titleRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 12,
     marginBottom: 10,
   },
-  titleTextGroup: {
-    flex: 1,
-  },
   screenTitle: {
-    fontSize: 26,
+    fontSize: 22,
     fontWeight: '800',
     color: Colors.text,
-    letterSpacing: -0.5,
+    letterSpacing: -0.4,
   },
-  screenSubtitle: {
-    fontSize: 13,
-    color: Colors.textMuted,
-    marginTop: 4,
+  titleActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   addLinkButton: {
     flexDirection: 'row',
@@ -2255,99 +2334,85 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderRadius: 8,
-    marginTop: 4,
   },
   addLinkButtonText: {
     fontSize: 12,
     fontWeight: '700',
     color: Colors.primary,
   },
-  providerChipsList: {
-    gap: 8,
-    paddingBottom: 10,
-  },
-  providerChip: {
+  sourcesBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 11,
-    paddingVertical: 6,
-    borderRadius: 8,
+    gap: 5,
     backgroundColor: Colors.surface,
     borderWidth: 1,
     borderColor: Colors.border,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
   },
-  providerChipSelected: {
-    backgroundColor: Colors.primaryMuted,
-    borderColor: Colors.primary,
-  },
-  providerChipText: {
+  sourcesBtnText: {
     fontSize: 12,
     fontWeight: '600',
     color: Colors.textSecondary,
   },
-  providerChipTextSelected: {
-    color: Colors.primary,
-    fontWeight: '700',
-  },
-  apiStatusCard: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: Colors.surface,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+  sourcesCountBadge: {
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 4,
     borderRadius: 8,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    marginBottom: 10,
-  },
-  apiStatusLeft: {
-    flexDirection: 'row',
+    backgroundColor: Colors.primary,
     alignItems: 'center',
-    gap: 10,
-    flex: 1,
+    justifyContent: 'center',
   },
-  apiStatusTextGroup: {
-    flex: 1,
+  sourcesCountText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#0D0F14',
   },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  apiStatusText: {
-    fontSize: 11,
-    color: Colors.textSecondary,
-    fontFamily: 'monospace',
-  },
-  apiAuthSubtext: {
-    fontSize: 11,
-    color: Colors.textMuted,
-    marginTop: 1,
-  },
-  apiRightAction: {
+  serverCompact: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginLeft: 8,
-  },
-  apiLatencyText: {
-    fontSize: 11,
-    color: Colors.textMuted,
-  },
-  bannerRetryBtn: {
-    backgroundColor: Colors.primaryMuted,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
+    backgroundColor: Colors.surface,
     borderWidth: 1,
-    borderColor: Colors.primary,
+    borderColor: Colors.border,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginBottom: 6,
   },
-  bannerRetryText: {
+  serverCompactError: {
+    borderColor: 'rgba(239, 68, 68, 0.4)',
+    backgroundColor: Colors.dangerMuted,
+  },
+  serverCompactText: {
+    flex: 1,
+    fontSize: 11,
+    color: Colors.textSecondary,
+    fontWeight: '600',
+  },
+  serverCompactTextError: {
+    color: Colors.danger,
+  },
+  serverCompactActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  serverCompactRetry: {
+    backgroundColor: Colors.danger,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  serverCompactRetryText: {
     fontSize: 11,
     fontWeight: '700',
-    color: Colors.primary,
+    color: '#FFFFFF',
+  },
+  serverCompactAccount: {
+    padding: 2,
   },
   searchBar: {
     flexDirection: 'row',
@@ -2437,19 +2502,30 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#FFFFFF',
   },
-  tagsContainer: {
-    marginTop: 12,
-    marginBottom: 10,
+  genreRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    marginBottom: 6,
   },
-  tagsLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: Colors.textMuted,
-    letterSpacing: 0.8,
-    marginBottom: 8,
+  genreList: {
+    flex: 1,
   },
-  tagsList: {
+  genreListContent: {
     gap: 8,
+    paddingRight: 8,
+  },
+  seeAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: 4,
+    paddingVertical: 6,
+  },
+  seeAllText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Colors.textMuted,
   },
   tagChip: {
     backgroundColor: Colors.surfaceRaised,
@@ -2540,36 +2616,37 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   recommendTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: Colors.text,
     letterSpacing: -0.3,
   },
   recommendTabsRow: {
     flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 4,
-    marginBottom: 12,
-  },
-  recommendTab: {
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 8,
     backgroundColor: Colors.surface,
+    borderRadius: 9,
     borderWidth: 1,
     borderColor: Colors.border,
+    padding: 3,
+    marginBottom: 10,
+  },
+  recommendTab: {
+    flex: 1,
+    paddingVertical: 7,
+    borderRadius: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   recommendTabActive: {
-    backgroundColor: Colors.primaryMuted,
-    borderColor: Colors.primary,
+    backgroundColor: Colors.primary,
   },
   recommendTabText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '600',
     color: Colors.textSecondary,
   },
   recommendTabTextActive: {
-    color: Colors.primary,
+    color: '#0D0F14',
     fontWeight: '700',
   },
   gridRow: {
@@ -2580,29 +2657,29 @@ const styles = StyleSheet.create({
     flex: 1,
     marginBottom: 12,
     backgroundColor: Colors.surface,
-    borderRadius: 10,
+    borderRadius: 9,
     borderWidth: 1,
     borderColor: Colors.border,
     overflow: 'hidden',
-    padding: 8,
+    padding: 6,
   },
   gridCardCover: {
     width: '100%',
-    height: 150,
+    aspectRatio: 0.64,
     borderRadius: 6,
     backgroundColor: Colors.surfaceLight,
   },
   gridCardTitle: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
     color: Colors.text,
-    marginTop: 8,
-    marginBottom: 6,
-    minHeight: 36,
+    marginTop: 6,
+    marginBottom: 5,
+    minHeight: 34,
   },
   skeletonCard: {
     flex: 1,
-    height: 210,
+    height: 200,
     borderRadius: 10,
     backgroundColor: Colors.surface,
     marginBottom: 12,
@@ -2907,6 +2984,50 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '800',
     color: '#0D0F14',
+  },
+  sourceOptionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: Colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginBottom: 8,
+  },
+  sourceOptionRowSelected: {
+    backgroundColor: Colors.primaryMuted,
+    borderColor: Colors.primary,
+  },
+  sourceOptionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: Colors.textSecondary,
+  },
+  sourceOptionTextSelected: {
+    color: Colors.primary,
+    fontWeight: '700',
+  },
+  sourceAccountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: Colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  sourceAccountText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+    color: Colors.textSecondary,
   },
   signedInBox: {
     backgroundColor: Colors.surfaceRaised,

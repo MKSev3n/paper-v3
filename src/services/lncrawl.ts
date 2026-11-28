@@ -1,10 +1,11 @@
 /**
  * LNCrawl Service Layer for Paper Light Novel Reader
  * Aligned with the live LNCrawl FastAPI OpenAPI 3.1.0 specification.
- * Uses API_URL, API_EMAIL, API_PASSWORD from src/config.ts
+ * Uses API_URL from src/config.ts. Credentials are never hardcoded; they are
+ * stored in expo-secure-store after a successful login.
  */
 
-import { API_URL, API_EMAIL, API_PASSWORD, APP_CONFIG } from '../config';
+import { API_URL, APP_CONFIG } from '../config';
 import {
   Novel,
   Chapter,
@@ -20,6 +21,9 @@ import {
   getStoredAuthToken,
   setStoredAuthToken,
   deleteStoredAuthToken,
+  getStoredLncrawlCredentials,
+  setStoredLncrawlCredentials,
+  deleteStoredLncrawlCredentials,
 } from './storage';
 
 const BASE_URL = API_URL.replace(/\/+$/, '');
@@ -111,6 +115,8 @@ async function performLogin(email: string, password: string): Promise<{ token: s
           throw new LNCrawlError('Authentication succeeded but server returned no token.', 500);
         }
         await setStoredAuthToken(data.token);
+        // Persist credentials so we can re-login after a 401 / expired token.
+        await setStoredLncrawlCredentials(email.trim(), password);
         return data;
       } catch (err: any) {
         clearTimeout(timeoutId);
@@ -140,8 +146,15 @@ async function ensureAuthenticated(forceLogin: boolean = false): Promise<string>
     if (existing) return existing;
   }
 
+  // No usable token (or a forced re-login after 401/expiry): use stored
+  // credentials. If none are stored, the user must log in via the UI.
+  const credentials = await getStoredLncrawlCredentials();
+  if (!credentials) {
+    throw new LNCrawlError('Not logged in to lncrawl', 401);
+  }
+
   if (!inFlightAuthPromise) {
-    inFlightAuthPromise = performLogin(API_EMAIL, API_PASSWORD)
+    inFlightAuthPromise = performLogin(credentials.email, credentials.password)
       .then((res) => res.token)
       .finally(() => {
         inFlightAuthPromise = null;
@@ -477,6 +490,7 @@ export const LNCrawlService = {
 
   async logout(): Promise<void> {
     await deleteStoredAuthToken();
+    await deleteStoredLncrawlCredentials();
   },
 
   /**

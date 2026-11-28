@@ -20,6 +20,8 @@ const KEYS = {
 // SecureStore keys allow only alphanumeric characters, '.', '-', and '_'
 const SECURE_KEYS = {
   AUTH_TOKEN: 'paper_lncrawl_token',
+  LNC_EMAIL: 'paper_lncrawl_email',
+  LNC_PASSWORD: 'paper_lncrawl_password',
 };
 
 const DEFAULT_SETTINGS: ReaderSettings = {
@@ -164,6 +166,58 @@ export async function setStoredAuthToken(token: string | null): Promise<void> {
 
 export async function deleteStoredAuthToken(): Promise<void> {
   await setStoredAuthToken(null);
+}
+
+// ==========================================
+// LNCRAWL CREDENTIALS (email + password)
+// Stored in expo-secure-store so the app can re-login after a 401 or an
+// expired token without ever hardcoding credentials. Never logged.
+// ==========================================
+
+export async function getStoredLncrawlCredentials(): Promise<{
+  email: string;
+  password: string;
+} | null> {
+  try {
+    if (!(await canUseSecureStore())) return null;
+    if (migrationPromise) {
+      await migrationPromise;
+    }
+    const email = await SecureStore.getItemAsync(SECURE_KEYS.LNC_EMAIL);
+    const password = await SecureStore.getItemAsync(SECURE_KEYS.LNC_PASSWORD);
+    if (email && password) {
+      return { email, password };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setStoredLncrawlCredentials(
+  email: string,
+  password: string
+): Promise<void> {
+  try {
+    if (!(await canUseSecureStore())) return;
+    if (migrationPromise) {
+      await migrationPromise;
+    }
+    await SecureStore.setItemAsync(SECURE_KEYS.LNC_EMAIL, email);
+    await SecureStore.setItemAsync(SECURE_KEYS.LNC_PASSWORD, password);
+  } catch {
+    console.warn('Failed to store LNCrawl credentials.');
+  }
+}
+
+export async function deleteStoredLncrawlCredentials(): Promise<void> {
+  try {
+    if (!(await canUseSecureStore())) return;
+    await SecureStore.deleteItemAsync(SECURE_KEYS.LNC_EMAIL);
+    await SecureStore.deleteItemAsync(SECURE_KEYS.LNC_PASSWORD);
+  } catch {
+    console.warn('Failed to clear LNCrawl credentials.');
+  }
 }
 
 export async function getLastReadNovelId(): Promise<string | null> {

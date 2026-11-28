@@ -1,11 +1,12 @@
 /**
  * Paper Light Novel Reader - Configuration
  * Change the LNCRAWL_API_BASE here to point to any LNCrawl-compatible backend.
+ *
+ * Credentials are never stored here. They are entered in the Discover login
+ * modal and kept in expo-secure-store (see src/services/storage.ts).
  */
 
 export const API_URL = 'https://lightnovel-crawler-vit0.onrender.com';
-export const API_EMAIL = 'admin';
-export const API_PASSWORD = 'admin';
 
 export const LNCRAWL_API_BASE = API_URL;
 

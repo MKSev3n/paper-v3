@@ -238,7 +238,10 @@ function ServerStatusCompact({
   onRetryConnection,
 }: ServerStatusCompactProps) {
   const showError = serverStatus.tested && !serverStatus.authenticated && !isWaking;
-  if (!isWaking && !showError) return null;
+  // Show the compact while waking, after a failed test, or whenever lncrawl is
+  // needed but the user is not logged in (so they can sign in).
+  if (!isWaking && serverStatus.authenticated) return null;
+  if (!isWaking && !showError && serverStatus.tested) return null;
 
   return (
     <View style={[styles.serverCompact, showError && styles.serverCompactError]}>
@@ -253,7 +256,11 @@ function ServerStatusCompact({
       >
         {isWaking
           ? 'Waking up server...'
-          : serverStatus.error || 'Server disconnected / unauthorized'}
+          : serverStatus.error
+            ? serverStatus.error
+            : serverStatus.tested
+              ? 'Server disconnected / unauthorized'
+              : 'Log in to lncrawl'}
       </Text>
       <View style={styles.serverCompactActions}>
         {showError && (
@@ -271,6 +278,7 @@ function ServerStatusCompact({
           hitSlop={6}
         >
           <Ionicons name="log-in-outline" size={16} color={Colors.primary} />
+          <Text style={styles.serverCompactLoginText}>Log in to lncrawl</Text>
         </Pressable>
       </View>
     </View>
@@ -2412,7 +2420,15 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   serverCompactAccount: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     padding: 2,
+  },
+  serverCompactLoginText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Colors.primary,
   },
   searchBar: {
     flexDirection: 'row',

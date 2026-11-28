@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -7,11 +7,12 @@ import {
   Pressable,
   Alert,
   ActivityIndicator,
+  Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { Colors, ReaderThemes, ReaderThemeMode } from '../../src/theme/colors';
+import { Colors, ReaderThemes, ReaderThemeMode, AppColors } from '../../src/theme/colors';
 import { useAppTheme } from '../../src/theme/ThemeProvider';
 import { Novel, ReaderSettings, StorageUsageStats } from '../../src/types';
 import { APP_CONFIG, LNCRAWL_API_BASE } from '../../src/config';
@@ -32,8 +33,476 @@ import {
   SOURCES,
 } from '../../src/sources';
 
+const createStyles = (colors: AppColors) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: colors.background,
+    },
+    scrollContent: {
+      paddingHorizontal: 16,
+      paddingTop: 12,
+      paddingBottom: 40,
+    },
+    screenTitle: {
+      fontSize: 26,
+      fontWeight: '800',
+      color: colors.text,
+      letterSpacing: -0.5,
+    },
+    screenSubtitle: {
+      fontSize: 13,
+      color: colors.textMuted,
+      marginTop: 4,
+      marginBottom: 20,
+    },
+    sectionTitle: {
+      fontSize: 11,
+      fontWeight: '700',
+      color: colors.textMuted,
+      letterSpacing: 1.5,
+      marginBottom: 8,
+    },
+    sectionHeaderRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 8,
+      marginTop: 6,
+    },
+    testAllBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      backgroundColor: colors.primary,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: 6,
+    },
+    testAllBtnDisabled: {
+      opacity: 0.6,
+    },
+    testAllBtnText: {
+      fontSize: 11,
+      fontWeight: '800',
+      color: colors.background,
+    },
+    statsCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: 16,
+      marginBottom: 12,
+    },
+    statsHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+    },
+    storageIconWrapper: {
+      width: 44,
+      height: 44,
+      borderRadius: 10,
+      backgroundColor: colors.primaryMuted,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    statsMainValue: {
+      fontSize: 22,
+      fontWeight: '800',
+      color: colors.text,
+    },
+    statsMainLabel: {
+      fontSize: 12,
+      color: colors.textMuted,
+    },
+    statsDivider: {
+      height: 1,
+      backgroundColor: colors.border,
+      marginVertical: 14,
+    },
+    statsRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+    },
+    statCol: {
+      flex: 1,
+      alignItems: 'center',
+    },
+    statColDivider: {
+      width: 1,
+      backgroundColor: colors.border,
+    },
+    statColValue: {
+      fontSize: 14,
+      fontWeight: '700',
+      color: colors.text,
+      marginBottom: 2,
+    },
+    statColLabel: {
+      fontSize: 10,
+      color: colors.textMuted,
+    },
+    privacyNotice: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: colors.surface,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 8,
+      gap: 8,
+      borderWidth: 1,
+      borderColor: colors.border,
+      marginBottom: 14,
+    },
+    privacyNoticeText: {
+      flex: 1,
+      fontSize: 11,
+      color: colors.textSecondary,
+      lineHeight: 16,
+    },
+    loadingRow: {
+      paddingVertical: 12,
+      alignItems: 'center',
+    },
+    storageListCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      paddingHorizontal: 12,
+      marginBottom: 22,
+    },
+    storageNovelRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: colors.border,
+    },
+    storageNovelRowLast: {
+      borderBottomWidth: 0,
+    },
+    storageNovelInfo: {
+      flex: 1,
+      marginRight: 12,
+    },
+    storageNovelTitle: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: colors.text,
+    },
+    storageNovelMeta: {
+      fontSize: 11,
+      color: colors.textMuted,
+      marginTop: 2,
+    },
+    deleteNovelBtn: {
+      padding: 8,
+      borderRadius: 6,
+      backgroundColor: colors.dangerMuted,
+    },
+    sourcesCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: 14,
+      marginBottom: 22,
+    },
+    sourcesIntro: {
+      fontSize: 11,
+      color: colors.textMuted,
+      lineHeight: 16,
+      marginBottom: 10,
+    },
+    sourceItemRow: {
+      paddingVertical: 12,
+      borderTopWidth: 1,
+      borderTopColor: colors.border,
+    },
+    sourceItemRowLast: {
+      paddingBottom: 2,
+    },
+    sourceItemHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+    },
+    sourceItemInfo: {
+      flex: 1,
+    },
+    sourceItemName: {
+      fontSize: 14,
+      fontWeight: '700',
+      color: colors.text,
+    },
+    sourceItemSite: {
+      fontSize: 11,
+      color: colors.textMuted,
+      fontFamily: 'monospace',
+      marginTop: 2,
+    },
+    sourceItemActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    diagBadge: {
+      paddingHorizontal: 7,
+      paddingVertical: 3,
+      borderRadius: 4,
+      borderWidth: 1,
+    },
+    diagBadgePass: {
+      backgroundColor: 'rgba(16, 185, 129, 0.14)',
+      borderColor: 'rgba(16, 185, 129, 0.45)',
+    },
+    diagBadgeFail: {
+      backgroundColor: colors.dangerMuted,
+      borderColor: 'rgba(239, 68, 68, 0.45)',
+    },
+    diagBadgeText: {
+      fontSize: 10,
+      fontWeight: '800',
+    },
+    diagBadgeTextPass: {
+      color: colors.success,
+    },
+    diagBadgeTextFail: {
+      color: colors.danger,
+    },
+    singleTestBtn: {
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: colors.border,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: 6,
+      minWidth: 52,
+      alignItems: 'center',
+    },
+    singleTestBtnText: {
+      fontSize: 11,
+      fontWeight: '700',
+      color: colors.primary,
+    },
+    diagStepsBox: {
+      marginTop: 10,
+      backgroundColor: colors.background,
+      borderRadius: 8,
+      padding: 10,
+      borderWidth: 1,
+      borderColor: colors.border,
+      gap: 6,
+    },
+    diagStepRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 6,
+    },
+    diagStepLabel: {
+      fontSize: 11,
+      fontWeight: '700',
+      color: colors.success,
+    },
+    diagStepLabelFail: {
+      color: colors.danger,
+    },
+    diagStepDetail: {
+      flex: 1,
+      fontSize: 11,
+      color: colors.textSecondary,
+      lineHeight: 15,
+    },
+    diagDurationText: {
+      fontSize: 10,
+      color: colors.textMuted,
+      marginTop: 2,
+      fontFamily: 'monospace',
+    },
+    prefsCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: 14,
+      marginBottom: 22,
+    },
+    prefLabel: {
+      fontSize: 11,
+      fontWeight: '700',
+      color: colors.textMuted,
+      letterSpacing: 0.8,
+      marginTop: 8,
+      marginBottom: 8,
+    },
+    themeRow: {
+      flexDirection: 'row',
+      gap: 10,
+      marginBottom: 8,
+    },
+    themeOptionCard: {
+      flex: 1,
+      paddingVertical: 10,
+      paddingHorizontal: 8,
+      borderRadius: 8,
+      borderWidth: 2,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+    },
+    themeOptionText: {
+      fontSize: 12,
+      fontWeight: '700',
+    },
+    sizeControlRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      marginBottom: 8,
+    },
+    sizeStepButton: {
+      backgroundColor: colors.surfaceRaised,
+      borderRadius: 8,
+      paddingHorizontal: 20,
+      paddingVertical: 10,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    sizeStepButtonText: {
+      fontSize: 16,
+      fontWeight: '800',
+      color: colors.text,
+    },
+    sizeDisplay: {
+      flex: 1,
+      alignItems: 'center',
+    },
+    sizeDisplayText: {
+      fontSize: 14,
+      fontWeight: '600',
+      color: colors.text,
+    },
+    optionRow: {
+      flexDirection: 'row',
+      gap: 8,
+      marginBottom: 8,
+    },
+    chipOption: {
+      flex: 1,
+      paddingVertical: 10,
+      alignItems: 'center',
+      borderRadius: 8,
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    chipOptionSelected: {
+      backgroundColor: colors.primaryMuted,
+      borderColor: colors.primary,
+    },
+    chipOptionText: {
+      fontSize: 12,
+      fontWeight: '600',
+      color: colors.textSecondary,
+    },
+    chipOptionTextSelected: {
+      color: colors.primary,
+    },
+    infoCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: 14,
+    },
+    infoRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      gap: 12,
+    },
+    infoLabel: {
+      fontSize: 12,
+      color: colors.textMuted,
+      fontWeight: '600',
+    },
+    infoValue: {
+      fontSize: 12,
+      color: colors.text,
+      fontWeight: '600',
+    },
+    infoValueMono: {
+      flex: 1,
+      textAlign: 'right',
+      fontSize: 11,
+      fontFamily: 'monospace',
+      color: colors.textSecondary,
+    },
+    infoDivider: {
+      height: 1,
+      backgroundColor: colors.border,
+      marginVertical: 10,
+    },
+    // Appearance section styles
+    appearanceCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: 14,
+      marginBottom: 22,
+    },
+    segmentedContainer: {
+      flexDirection: 'row',
+      height: 40,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 10,
+      overflow: 'hidden',
+      marginBottom: 12,
+    },
+    segment: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    segmentSelected: {
+      backgroundColor: colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    segmentText: {
+      fontSize: 13,
+      fontWeight: '600',
+    },
+    segmentTextSelected: {
+      color: colors.text,
+    },
+    segmentTextUnselected: {
+      color: colors.textSecondary,
+    },
+    appearanceRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    appearanceLabel: {
+      fontSize: 14,
+      fontWeight: '500',
+      color: colors.text,
+    },
+  });
+
 export default function SettingsScreen() {
   const router = useRouter();
+  const { mode, setMode, colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [novels, setNovels] = useState<Novel[]>([]);
   const [stats, setStats] = useState<StorageUsageStats | null>(null);
   const [loadingStorage, setLoadingStorage] = useState(true);
@@ -42,6 +511,7 @@ export default function SettingsScreen() {
     fontSize: 18,
     lineSpacing: 1.8,
     fontFamily: 'serif',
+    followsAppTheme: false,
   });
 
   // Sources diagnostic state
@@ -146,12 +616,48 @@ export default function SettingsScreen() {
           Storage management, local source diagnostics, reading preferences, and backend details
         </Text>
 
+        {/* Appearance Category */}
+        <Text style={styles.sectionTitle}>APPEARANCE</Text>
+        <View style={styles.appearanceCard}>
+          <View style={styles.segmentedContainer}>
+            {(['light', 'dark', 'system'] as const).map((m) => (
+              <Pressable
+                key={m}
+                style={[
+                  styles.segment,
+                  mode === m && styles.segmentSelected,
+                ]}
+                onPress={() => setMode(m)}
+                accessibilityLabel={`Set theme to ${m.charAt(0).toUpperCase() + m.slice(1)}`}
+                hitSlop={8}
+              >
+                <Text style={[
+                  styles.segmentText,
+                  mode === m ? styles.segmentTextSelected : styles.segmentTextUnselected,
+                ]}>
+                  {m.charAt(0).toUpperCase() + m.slice(1)}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <View style={styles.appearanceRow}>
+            <Text style={styles.appearanceLabel}>Reader follows app theme</Text>
+            <Switch
+              value={readerSettings.followsAppTheme ?? false}
+              onValueChange={(v) => updateReaderSetting('followsAppTheme', v)}
+              trackColor={{ false: colors.border, true: colors.primary }}
+              thumbColor={colors.surfaceRaised}
+            />
+          </View>
+        </View>
+
         {/* Storage Management Category */}
         <Text style={styles.sectionTitle}>STORAGE MANAGEMENT</Text>
         <View style={styles.statsCard}>
           <View style={styles.statsHeader}>
             <View style={styles.storageIconWrapper}>
-              <Ionicons name="pie-chart" size={20} color={Colors.primary} />
+              <Ionicons name="pie-chart" size={20} color={colors.primary} />
             </View>
             <View>
               <Text style={styles.statsMainValue}>
@@ -192,7 +698,7 @@ export default function SettingsScreen() {
         </View>
 
         <View style={styles.privacyNotice}>
-          <Ionicons name="shield-checkmark" size={16} color={Colors.success} />
+          <Ionicons name="shield-checkmark" size={16} color={colors.success} />
           <Text style={styles.privacyNoticeText}>
             Chapters are stored in app-private SQLite ({stats?.downloadedNovelsCount ?? 0} novels) and covers in sandboxed app storage.
           </Text>
@@ -200,7 +706,7 @@ export default function SettingsScreen() {
 
         {loadingStorage ? (
           <View style={styles.loadingRow}>
-            <ActivityIndicator size="small" color={Colors.primary} />
+            <ActivityIndicator size="small" color={colors.primary} />
           </View>
         ) : novels.length > 0 ? (
           <View style={styles.storageListCard}>
@@ -234,7 +740,7 @@ export default function SettingsScreen() {
                   onPress={() => handleDeleteNovelStorage(novel)}
                   hitSlop={8}
                 >
-                  <Ionicons name="trash-outline" size={16} color={Colors.danger} />
+                  <Ionicons name="trash-outline" size={16} color={colors.danger} />
                 </Pressable>
               </View>
             ))}
@@ -313,7 +819,7 @@ export default function SettingsScreen() {
                       disabled={isTesting}
                     >
                       {isTesting ? (
-                        <ActivityIndicator size="small" color={Colors.primary} />
+                        <ActivityIndicator size="small" color={colors.primary} />
                       ) : (
                         <Text style={styles.singleTestBtnText}>Test</Text>
                       )}
@@ -328,7 +834,7 @@ export default function SettingsScreen() {
                         <Ionicons
                           name={st.passed ? 'checkmark-circle' : 'close-circle'}
                           size={14}
-                          color={st.passed ? Colors.success : Colors.danger}
+                          color={st.passed ? colors.success : colors.danger}
                         />
                         <Text
                           style={[
@@ -486,420 +992,3 @@ export default function SettingsScreen() {
     </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
-  scrollContent: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 40,
-  },
-  screenTitle: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: Colors.text,
-    letterSpacing: -0.5,
-  },
-  screenSubtitle: {
-    fontSize: 13,
-    color: Colors.textMuted,
-    marginTop: 4,
-    marginBottom: 20,
-  },
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: Colors.textMuted,
-    letterSpacing: 1,
-    marginBottom: 8,
-  },
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 8,
-    marginTop: 6,
-  },
-  testAllBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: Colors.primary,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-  },
-  testAllBtnDisabled: {
-    opacity: 0.6,
-  },
-  testAllBtnText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#0D0F14',
-  },
-  statsCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    padding: 16,
-    marginBottom: 12,
-  },
-  statsHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  storageIconWrapper: {
-    width: 44,
-    height: 44,
-    borderRadius: 10,
-    backgroundColor: Colors.primaryMuted,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statsMainValue: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: Colors.text,
-  },
-  statsMainLabel: {
-    fontSize: 12,
-    color: Colors.textMuted,
-  },
-  statsDivider: {
-    height: 1,
-    backgroundColor: Colors.border,
-    marginVertical: 14,
-  },
-  statsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  statCol: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  statColDivider: {
-    width: 1,
-    backgroundColor: Colors.border,
-  },
-  statColValue: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: Colors.text,
-    marginBottom: 2,
-  },
-  statColLabel: {
-    fontSize: 10,
-    color: Colors.textMuted,
-  },
-  privacyNotice: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: Colors.surface,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    gap: 8,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    marginBottom: 14,
-  },
-  privacyNoticeText: {
-    flex: 1,
-    fontSize: 11,
-    color: Colors.textSecondary,
-    lineHeight: 16,
-  },
-  loadingRow: {
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  storageListCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    paddingHorizontal: 12,
-    marginBottom: 22,
-  },
-  storageNovelRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-  },
-  storageNovelRowLast: {
-    borderBottomWidth: 0,
-  },
-  storageNovelInfo: {
-    flex: 1,
-    marginRight: 12,
-  },
-  storageNovelTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  storageNovelMeta: {
-    fontSize: 11,
-    color: Colors.textMuted,
-    marginTop: 2,
-  },
-  deleteNovelBtn: {
-    padding: 8,
-    borderRadius: 6,
-    backgroundColor: Colors.dangerMuted,
-  },
-  sourcesCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    padding: 14,
-    marginBottom: 22,
-  },
-  sourcesIntro: {
-    fontSize: 11,
-    color: Colors.textMuted,
-    lineHeight: 16,
-    marginBottom: 10,
-  },
-  sourceItemRow: {
-    paddingVertical: 12,
-    borderTopWidth: 1,
-    borderTopColor: Colors.border,
-  },
-  sourceItemRowLast: {
-    paddingBottom: 2,
-  },
-  sourceItemHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  sourceItemInfo: {
-    flex: 1,
-  },
-  sourceItemName: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: Colors.text,
-  },
-  sourceItemSite: {
-    fontSize: 11,
-    color: Colors.textMuted,
-    fontFamily: 'monospace',
-    marginTop: 2,
-  },
-  sourceItemActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  diagBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 4,
-    borderWidth: 1,
-  },
-  diagBadgePass: {
-    backgroundColor: 'rgba(16, 185, 129, 0.14)',
-    borderColor: 'rgba(16, 185, 129, 0.45)',
-  },
-  diagBadgeFail: {
-    backgroundColor: Colors.dangerMuted,
-    borderColor: 'rgba(239, 68, 68, 0.45)',
-  },
-  diagBadgeText: {
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  diagBadgeTextPass: {
-    color: Colors.success,
-  },
-  diagBadgeTextFail: {
-    color: Colors.danger,
-  },
-  singleTestBtn: {
-    backgroundColor: Colors.surfaceRaised,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-    minWidth: 52,
-    alignItems: 'center',
-  },
-  singleTestBtnText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: Colors.primary,
-  },
-  diagStepsBox: {
-    marginTop: 10,
-    backgroundColor: Colors.background,
-    borderRadius: 8,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    gap: 6,
-  },
-  diagStepRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 6,
-  },
-  diagStepLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: Colors.success,
-  },
-  diagStepLabelFail: {
-    color: Colors.danger,
-  },
-  diagStepDetail: {
-    flex: 1,
-    fontSize: 11,
-    color: Colors.textSecondary,
-    lineHeight: 15,
-  },
-  diagDurationText: {
-    fontSize: 10,
-    color: Colors.textMuted,
-    marginTop: 2,
-    fontFamily: 'monospace',
-  },
-  prefsCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    padding: 14,
-    marginBottom: 22,
-  },
-  prefLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: Colors.textMuted,
-    letterSpacing: 0.8,
-    marginTop: 8,
-    marginBottom: 8,
-  },
-  themeRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 8,
-  },
-  themeOptionCard: {
-    flex: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 8,
-    borderRadius: 8,
-    borderWidth: 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-  },
-  themeOptionText: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  sizeControlRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 8,
-  },
-  sizeStepButton: {
-    backgroundColor: Colors.surfaceRaised,
-    borderRadius: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  sizeStepButtonText: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: Colors.text,
-  },
-  sizeDisplay: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  sizeDisplayText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: Colors.text,
-  },
-  optionRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 8,
-  },
-  chipOption: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-    borderRadius: 8,
-    backgroundColor: Colors.surfaceRaised,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  chipOptionSelected: {
-    backgroundColor: Colors.primaryMuted,
-    borderColor: Colors.primary,
-  },
-  chipOptionText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: Colors.textSecondary,
-  },
-  chipOptionTextSelected: {
-    color: Colors.primary,
-  },
-  infoCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    padding: 14,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 12,
-  },
-  infoLabel: {
-    fontSize: 12,
-    color: Colors.textMuted,
-    fontWeight: '600',
-  },
-  infoValue: {
-    fontSize: 12,
-    color: Colors.text,
-    fontWeight: '600',
-  },
-  infoValueMono: {
-    flex: 1,
-    textAlign: 'right',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    color: Colors.textSecondary,
-  },
-  infoDivider: {
-    height: 1,
-    backgroundColor: Colors.border,
-    marginVertical: 10,
-  },
-});

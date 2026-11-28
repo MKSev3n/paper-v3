@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -19,6 +19,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { ReaderThemes, ReaderThemeMode, Colors } from '../../src/theme/colors';
+import { useAppTheme } from '../../src/theme/ThemeProvider';
 import { Chapter, Novel, ReaderSettings } from '../../src/types';
 import {
   getChapterById,
@@ -82,6 +83,7 @@ function parseChapterParagraphs(rawContent: string): string[] {
 
 export default function ReaderScreen() {
   const router = useRouter();
+  const { scheme, colors: appColors } = useAppTheme();
   const { id: chapterId, novelId } = useLocalSearchParams<{
     id: string;
     novelId: string;
@@ -131,8 +133,15 @@ export default function ReaderScreen() {
   } | null>(null);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Active theme tokens
-  const currentTheme = ReaderThemes[settings.theme] || ReaderThemes.dark;
+  // Active theme tokens: when followsAppTheme is ON, use Paper (light) for light scheme and Night (dark) for dark scheme
+  const effectiveThemeMode = useMemo((): ReaderThemeMode => {
+    if (settings.followsAppTheme) {
+      return scheme === 'dark' ? 'dark' : 'light';
+    }
+    return settings.theme;
+  }, [settings.theme, settings.followsAppTheme, scheme]);
+
+  const currentTheme = ReaderThemes[effectiveThemeMode] || ReaderThemes.dark;
 
   const flushPendingProgress = useCallback(() => {
     if (saveTimeoutRef.current) {
@@ -742,18 +751,27 @@ export default function ReaderScreen() {
           onPress={() => setSettingsModalVisible(false)}
         >
           <Pressable
-            style={[styles.modalSheet, { backgroundColor: Colors.surface, borderColor: Colors.border }]}
+            style={[styles.modalSheet, { backgroundColor: currentTheme.surface, borderColor: currentTheme.border }]}
             onPress={(e) => e.stopPropagation()}
           >
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Reader Appearance</Text>
+              <Text style={[styles.modalTitle, { color: currentTheme.text }]}>Reader Appearance</Text>
               <Pressable onPress={() => setSettingsModalVisible(false)} hitSlop={10}>
-                <Ionicons name="close" size={20} color={Colors.textMuted} />
+                <Ionicons name="close" size={20} color={currentTheme.textSecondary} />
               </Pressable>
             </View>
 
+            {settings.followsAppTheme && (
+              <View style={[styles.followsAppThemeNotice, { backgroundColor: appColors.primaryMuted, borderColor: appColors.primary }]}>
+                <Ionicons name="information-circle" size={16} color={appColors.primary} />
+                <Text style={[styles.followsAppThemeNoticeText, { color: appColors.primary }]}>
+                  Reader follows app theme: using {scheme === 'dark' ? 'Night' : 'Paper'} mode
+                </Text>
+              </View>
+            )}
+
             {/* Themes Selection */}
-            <Text style={styles.settingGroupLabel}>THEME</Text>
+            <Text style={[styles.settingGroupLabel, { color: appColors.textMuted }]}>THEME</Text>
             <View style={styles.themeRow}>
               {(['dark', 'sepia', 'light'] as ReaderThemeMode[]).map((mode) => {
                 const isSelected = settings.theme === mode;
@@ -763,15 +781,20 @@ export default function ReaderScreen() {
                     key={mode}
                     style={[
                       styles.themeOptionCard,
-                      { backgroundColor: t.background, borderColor: isSelected ? Colors.primary : t.border },
+                      { backgroundColor: t.background, borderColor: isSelected ? appColors.primary : t.border },
+                      settings.followsAppTheme && { opacity: 0.6 },
                     ]}
-                    onPress={() => updateSetting('theme', mode)}
+                    onPress={() => !settings.followsAppTheme && updateSetting('theme', mode)}
+                    disabled={settings.followsAppTheme}
                   >
                     <Text style={[styles.themeOptionText, { color: t.text }]}>
                       {t.name}
                     </Text>
-                    {isSelected && (
-                      <Ionicons name="checkmark-circle" size={16} color={Colors.primary} />
+                    {isSelected && !settings.followsAppTheme && (
+                      <Ionicons name="checkmark-circle" size={16} color={appColors.primary} />
+                    )}
+                    {settings.followsAppTheme && effectiveThemeMode === mode && (
+                      <Ionicons name="checkmark-circle" size={16} color={appColors.primary} />
                     )}
                   </Pressable>
                 );
@@ -1178,5 +1201,19 @@ const styles = StyleSheet.create({
   },
   fontFamilyOptionTextSelected: {
     color: Colors.primary,
+  },
+  followsAppThemeNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  followsAppThemeNoticeText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '500',
   },
 });

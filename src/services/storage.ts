@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   lineSpacing: 1.8,
   fontFamily: 'serif',
   chapterNavigation: 'scroll',
+  followsAppTheme: false,
 };
 
 export const DEFAULT_DISCOVER_PROVIDERS: SearchProviderId[] = [

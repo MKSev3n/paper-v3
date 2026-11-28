@@ -20,9 +20,12 @@ import {
   getChaptersForNovel,
   saveChaptersBatch,
   getReadingProgress,
+  deleteNovel,
+  deleteDownloadedChapters,
 } from '../../src/services/database';
 import { LNCrawlService, stripHtmlTags } from '../../src/services/lncrawl';
 import { DownloadManager } from '../../src/services/downloadManager';
+import { deleteLocalCover } from '../../src/services/fileStorage';
 import {
   buildLocalChapterId,
   extractSourceDomain,
@@ -219,6 +222,28 @@ export default function NovelDetailScreen() {
     }
   };
 
+  const handleRemoveBook = () => {
+    if (!novel) return;
+    Alert.alert(
+      'Remove from library',
+      `Remove "${novel.title}", its chapters, downloads and progress?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            DownloadManager.cancelDownload(novel.id);
+            await deleteDownloadedChapters(novel.id);
+            await deleteLocalCover(novel.localCoverPath);
+            await deleteNovel(novel.id);
+            router.replace('/(tabs)');
+          },
+        },
+      ]
+    );
+  };
+
   const displayedChapters = chapters
     .filter((ch) => (filterDownloadedOnly ? ch.isDownloaded : true))
     .sort((a, b) => (sortAscending ? a.serial - b.serial : b.serial - a.serial));
@@ -244,6 +269,13 @@ export default function NovelDetailScreen() {
           </Pressable>
 
           <View style={styles.navRight}>
+            <Pressable
+              style={styles.navButton}
+              onPress={handleRemoveBook}
+              hitSlop={10}
+            >
+              <Ionicons name="trash-outline" size={20} color={Colors.danger} />
+            </Pressable>
             <Pressable
               style={styles.navButton}
               onPress={() => {

@@ -8,17 +8,22 @@ import {
   Image,
   RefreshControl,
   Dimensions,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors } from '../../src/theme/colors';
+import { deleteLocalCover } from '../../src/services/fileStorage';
+import { DownloadManager } from '../../src/services/downloadManager';
 import { Novel, ReadingProgress } from '../../src/types';
 import {
   getAllNovels,
   getDownloadedNovels,
   getAllReadingProgress,
   getNovelById,
+  deleteNovel,
+  deleteDownloadedChapters,
 } from '../../src/services/database';
 
 const { width } = Dimensions.get('window');
@@ -81,6 +86,28 @@ export default function LibraryScreen() {
     setRefreshing(true);
     await loadLibraryData();
     setRefreshing(false);
+  };
+
+  const handleRemoveBook = (novel: Novel) => {
+    Alert.alert(
+      'Remove from library',
+      `Remove "${novel.title}", its chapters, downloads and progress?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            DownloadManager.cancelDownload(novel.id);
+            await deleteDownloadedChapters(novel.id);
+            await deleteLocalCover(novel.localCoverPath);
+            await deleteNovel(novel.id);
+            setNovels((prev) => prev.filter((n) => n.id !== novel.id));
+            loadLibraryData();
+          },
+        },
+      ]
+    );
   };
 
   const renderHeader = () => (
@@ -216,6 +243,7 @@ export default function LibraryScreen() {
             params: { id: item.id },
           })
         }
+        onLongPress={() => handleRemoveBook(item)}
       >
         <View style={styles.coverWrapper}>
           <Image

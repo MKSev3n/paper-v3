@@ -299,7 +299,7 @@ export default function DownloadsScreen() {
             onPress={() => handleDeleteDownloads(item)}
           >
             <Ionicons name="trash-outline" size={14} color={Colors.danger} />
-            <Text style={styles.actionButtonDangerText}>Delete</Text>
+            <Text style={styles.actionButtonDangerText}>Delete downloads</Text>
           </Pressable>
         </View>
       </View>

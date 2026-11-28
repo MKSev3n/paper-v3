@@ -1,5 +1,6 @@
 {
   "expo": {
+    "userInterfaceStyle": "automatic",
     "name": "Paper",
     "slug": "paper",
     "version": "3.0.0",

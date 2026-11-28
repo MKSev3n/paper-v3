@@ -30,6 +30,63 @@ export const Colors = {
   dangerMuted: 'rgba(239, 68, 68, 0.15)',
 };
 
+export type AppColors = {
+  background: string;
+  surface: string;
+  surfaceRaised: string;
+  border: string;
+  borderLight: string;
+  text: string;
+  textSecondary: string;
+  textMuted: string;
+  primary: string;
+  primaryPressed: string;
+  primaryMuted: string;
+  success: string;
+  successMuted: string;
+  warning: string;
+  danger: string;
+  dangerMuted: string;
+};
+
+export const lightColors: AppColors = {
+  background: '#F6F1E7',
+  surface: '#FCFAF4',
+  surfaceRaised: '#FFFFFF',
+  border: '#E3DAC6',
+  borderLight: '#EFE9D9',
+  text: '#2D2924',
+  textSecondary: '#6F6455',
+  textMuted: '#776C5D',
+  primary: '#8C5A33',
+  primaryPressed: '#7F502D',
+  primaryMuted: 'rgba(140,90,51,0.12)',
+  success: '#4F7A5B',
+  successMuted: 'rgba(79,122,91,0.14)',
+  warning: '#B07E2E',
+  danger: '#A3493F',
+  dangerMuted: 'rgba(163,73,63,0.12)',
+};
+
+export const darkColors: AppColors = {
+  background: '#17140F',
+  surface: '#201C16',
+  surfaceRaised: '#28231B',
+  border: '#332E25',
+  borderLight: '#28231B',
+  text: '#ECE5D6',
+  textSecondary: '#A99D87',
+  textMuted: '#8F846F',
+  primary: '#C99B6A',
+  primaryPressed: '#B88A5B',
+  primaryMuted: 'rgba(201,155,106,0.16)',
+  success: '#7FAF8B',
+  successMuted: 'rgba(127,175,139,0.16)',
+  warning: '#D2A24C',
+  danger: '#D9776C',
+  dangerMuted: 'rgba(217,119,108,0.16)',
+};
+
 export type ReaderThemeMode = 'dark' | 'sepia' | 'light';
 
 export const ReaderThemes: Record<

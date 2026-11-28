@@ -1,7 +1,7 @@
 {
   "name": "paper",
   "main": "expo-router/entry",
-  "version": "2.10.0",
+  "version": "3.0.0",
   "scripts": {
     "dev": "expo start --port 3000",
     "start": "expo start --port 3000",

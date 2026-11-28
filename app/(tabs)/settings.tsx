@@ -12,6 +12,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, ReaderThemes, ReaderThemeMode } from '../../src/theme/colors';
+import { useAppTheme } from '../../src/theme/ThemeProvider';
 import { Novel, ReaderSettings, StorageUsageStats } from '../../src/types';
 import { APP_CONFIG, LNCRAWL_API_BASE } from '../../src/config';
 import {

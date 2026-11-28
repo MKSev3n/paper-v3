@@ -5,6 +5,7 @@ import { View, StyleSheet, ActivityIndicator } from 'react-native';
 import { Colors } from '../src/theme/colors';
 import { getDatabase } from '../src/services/database';
 import { initFileStorage } from '../src/services/fileStorage';
+import HiddenChapterWebView from '../src/components/HiddenChapterWebView';
 
 export default function RootLayout() {
   const [ready, setReady] = React.useState(false);
@@ -36,6 +37,7 @@ export default function RootLayout() {
   return (
     <View style={styles.root}>
       <StatusBar style="light" backgroundColor={Colors.background} />
+      <HiddenChapterWebView />
       <Stack
         screenOptions={{
           headerShown: false,

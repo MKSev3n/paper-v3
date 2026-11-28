@@ -10,7 +10,8 @@ import * as Sharing from 'expo-sharing';
 import { Novel, Chapter, DownloadTask } from '../types';
 import { APP_CONFIG } from '../config';
 import { LNCrawlService } from './lncrawl';
-import { getSource, Source, SourceBlockedError, SourceHttpError } from '../sources';
+import { getSource, Source, SOURCES, SourceBlockedError, SourceHttpError, toAbsoluteUrl } from '../sources';
+import { extractCleanParagraphText, parseDocument } from '../sources/http';
 import {
   upsertNovel,
   saveChapter,
@@ -19,6 +20,10 @@ import {
   getNovelById,
 } from './database';
 import { downloadCoverImage } from './fileStorage';
+import {
+  isWebViewChapterLoaderAvailable,
+  loadChapterHtmlViaWebView,
+} from './webviewChapterLoader';
 
 type ProgressListener = (task: DownloadTask) => void;
 
@@ -88,6 +93,178 @@ function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
+// ==========================================
+// PER-DOMAIN REQUEST SCHEDULER
+// Cloudflare blocks are triggered by bursty traffic. All local chapter requests
+// for a domain are serialized: one request at a time, 1-2.5s jittered gaps, and
+// the domain's queue is paused 20-30s whenever a block is detected.
+// ==========================================
+
+const DOMAIN_MIN_GAP_MS = 1000;
+const DOMAIN_MAX_GAP_MS = 2500;
+const DOMAIN_BLOCK_PAUSE_MIN_MS = 20000;
+const DOMAIN_BLOCK_PAUSE_MAX_MS = 30000;
+const BLOCK_MAX_RETRIES = 3;
+const BLOCK_RETRY_MIN_MS = 3000;
+const BLOCK_RETRY_MAX_MS = 6000;
+
+interface DomainState {
+  chain: Promise<unknown>;
+  lastRequestAt: number;
+  pausedUntil: number;
+}
+
+const domainStates = new Map<string, DomainState>();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function randomBetween(min: number, max: number): number {
+  return min + Math.random() * (max - min);
+}
+
+function extractDomain(site: string): string {
+  try {
+    return new URL(site).hostname.replace(/^www\./i, '').toLowerCase();
+  } catch {
+    return site.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
+  }
+}
+
+function getDomainState(domain: string): DomainState {
+  let state = domainStates.get(domain);
+  if (!state) {
+    state = { chain: Promise.resolve(), lastRequestAt: 0, pausedUntil: 0 };
+    domainStates.set(domain, state);
+  }
+  return state;
+}
+
+/** Pause a domain's request queue for `ms` (used after a Cloudflare block). */
+function pauseDomain(domain: string, ms: number): void {
+  const state = getDomainState(domain);
+  state.pausedUntil = Math.max(state.pausedUntil, Date.now() + ms);
+}
+
+/** Schedule one request for a domain, honoring pause + jittered spacing. */
+function scheduleDomain<T>(domain: string, task: () => Promise<T>): Promise<T> {
+  const state = getDomainState(domain);
+  const run = state.chain.then(async () => {
+    const pauseWait = state.pausedUntil - Date.now();
+    if (pauseWait > 0) {
+      await sleep(pauseWait);
+    }
+    const gap = randomBetween(DOMAIN_MIN_GAP_MS, DOMAIN_MAX_GAP_MS);
+    const since = Date.now() - state.lastRequestAt;
+    if (since < gap) {
+      await sleep(gap - since);
+    }
+    state.lastRequestAt = Date.now();
+    return task();
+  });
+  // Keep the chain alive even if this request rejects.
+  state.chain = run.catch(() => {});
+  return run;
+}
+
+function isTransientError(err: any): boolean {
+  if (err instanceof SourceHttpError || err?.name === 'SourceHttpError') {
+    const status = typeof err?.status === 'number' ? err.status : 0;
+    return status === 408 || status === 429 || status === 0 || status >= 500;
+  }
+  return false;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)),
+      ms
+    );
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+function normalizeTitle(title?: string): string {
+  return (title || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/** Pick the search result whose title best matches the target novel title. */
+function pickBestNovelMatch<T extends { title: string }>(
+  results: T[],
+  title: string
+): T | null {
+  const target = normalizeTitle(title);
+  if (!target) return null;
+  let best: T | null = null;
+  let bestScore = 0;
+  for (const r of results) {
+    const candidate = normalizeTitle(r.title);
+    let score = 0;
+    if (candidate === target) {
+      score = 100;
+    } else if (candidate.includes(target) || target.includes(candidate)) {
+      score = 60;
+    } else {
+      const a = new Set(target.split(' '));
+      const b = new Set(candidate.split(' '));
+      let inter = 0;
+      a.forEach((t) => {
+        if (b.has(t)) inter += 1;
+      });
+      score = inter;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = r;
+    }
+  }
+  return bestScore >= 2 ? best : null;
+}
+
+/** Find the equivalent chapter on another source by title, then by serial. */
+function findEquivalentChapter<T extends { title: string; index: number }>(
+  chapters: T[],
+  chapter: Chapter
+): T | null {
+  const target = normalizeTitle(chapter.title);
+  if (target) {
+    const byTitle = chapters.find((c) => normalizeTitle(c.title) === target);
+    if (byTitle) return byTitle;
+  }
+  const byIndex = chapters.find((c) => c.index === chapter.serial - 1);
+  return byIndex || null;
+}
+
+/** Extract readable chapter text from rendered chapter HTML. */
+function extractTextFromChapterHtml(html: string): string {
+  const doc = parseDocument(html);
+  const el =
+    doc.querySelector('#chr-content') ||
+    doc.querySelector('#chapter-content, .chr-c, .chapter-c');
+  if (!el) return '';
+  const noise = el.querySelectorAll(
+    '.chapter-nav, .unlock-buttons, .box-ads, .hidden-xs, [align="center"] ins'
+  );
+  for (const n of noise) {
+    (n as any).remove();
+  }
+  return extractCleanParagraphText(el);
+}
+
 class DownloadManagerService {
   private activeTasks: Map<string, DownloadTask> = new Map();
   private cancelFlags: Map<string, boolean> = new Map();
@@ -144,14 +321,20 @@ class DownloadManagerService {
     return 'ok';
   }
 
-  private async fetchLocalChapterWithRetries(
+  /**
+   * Fetch a chapter from a local source, auto-retrying Cloudflare blocks up to
+   * 3 times with a 3-6s exponential (jittered) delay. On a block the domain's
+   * queue is paused for 20-30s so other chapters back off.
+   */
+  private async fetchLocalChapterWithBlockRetries(
     source: Source,
     chapterPath: string,
-    novelId?: string,
-    profile: LocalSourceProfile = DEFAULT_LOCAL_PROFILE
+    domain: string,
+    novelId: string | undefined,
+    profile: LocalSourceProfile
   ): Promise<string> {
     let lastError: Error | null = null;
-    for (let attempt = 0; attempt <= profile.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= BLOCK_MAX_RETRIES; attempt++) {
       if (novelId && this.cancelFlags.get(novelId)) {
         throw new Error('Download cancelled');
       }
@@ -163,21 +346,144 @@ class DownloadManagerService {
         return text;
       } catch (err: any) {
         lastError = err instanceof Error ? err : new Error(String(err || 'Chapter fetch failed'));
-        // Website blocks (403 / Cloudflare challenge) are never auto-retried;
-        // retrying only makes the source deny access harder. Surface immediately.
+
         if (isBlockedError(err)) {
+          // Pause this domain's queue so subsequent chapters wait out the block.
+          pauseDomain(domain, randomBetween(DOMAIN_BLOCK_PAUSE_MIN_MS, DOMAIN_BLOCK_PAUSE_MAX_MS));
+          if (attempt < BLOCK_MAX_RETRIES) {
+            // Exponential 3s -> 6s (capped) with jitter, kept within 3-6s.
+            const exp = BLOCK_RETRY_MIN_MS * Math.pow(2, attempt);
+            const delay = Math.min(
+              BLOCK_RETRY_MAX_MS,
+              Math.max(BLOCK_RETRY_MIN_MS, exp + randomBetween(-400, 400))
+            );
+            await sleep(delay);
+            continue;
+          }
           throw lastError;
         }
-        if (attempt < profile.maxRetries) {
-          const backoff = Math.min(
-            2000,
-            profile.requestDelayMs * Math.pow(2, attempt)
-          );
-          await new Promise((r) => setTimeout(r, backoff));
+
+        // Non-block transient errors keep a short bounded retry.
+        if (attempt < profile.maxRetries && isTransientError(err)) {
+          await sleep(Math.min(2000, profile.requestDelayMs * Math.pow(2, attempt)));
+          continue;
         }
+        throw lastError;
       }
     }
     throw lastError || new Error('Failed to fetch chapter from source.');
+  }
+
+  /** Last-resort: render the chapter URL in the hidden WebView and extract text. */
+  private async tryWebViewChapter(
+    source: Source,
+    chapterPath: string
+  ): Promise<string | null> {
+    if (!isWebViewChapterLoaderAvailable()) return null;
+    const url = toAbsoluteUrl(chapterPath, source.site);
+    if (!url) return null;
+    try {
+      const html = await loadChapterHtmlViaWebView(url, 35000);
+      const text = extractTextFromChapterHtml(html);
+      if (text && text.trim().length > 0) return text;
+    } catch (err) {
+      console.warn(`WebView chapter fallback failed for ${url}:`, err);
+    }
+    return null;
+  }
+
+  /**
+   * After the primary source's retries fail, try the same chapter number on
+   * another configured source for the same novel (matched by title/serial).
+   */
+  private async tryAlternateSources(
+    novel: Novel,
+    chapter: Chapter,
+    failedProviderId: string,
+    novelId: string
+  ): Promise<{ content: string; provider: string; path: string } | null> {
+    const alternates = SOURCES.filter((s) => s.id !== failedProviderId);
+    for (const alt of alternates) {
+      if (this.cancelFlags.get(novelId)) return null;
+      try {
+        const results = await withTimeout(
+          alt.search(novel.title),
+          15000,
+          `${alt.name} search`
+        );
+        const match = pickBestNovelMatch(results, novel.title);
+        if (!match) continue;
+
+        const detail = await withTimeout(
+          alt.getNovel(match.path),
+          20000,
+          `${alt.name} novel`
+        );
+        const target = findEquivalentChapter(detail.chapters, chapter);
+        if (!target) continue;
+
+        const domain = extractDomain(alt.site);
+        const content = await scheduleDomain(domain, () => alt.getChapter(target.path));
+        if (content && content.trim().length > 0) {
+          return { content, provider: alt.id, path: target.path };
+        }
+      } catch (err) {
+        console.warn(`Alternate source ${alt.id} failed for chapter ${chapter.id}:`, err);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Full local fetch pipeline for one chapter:
+   * primary source (block-aware retries) -> alternate source -> hidden WebView.
+   */
+  private async fetchChapterWithFallbacks(
+    novel: Novel,
+    chapter: Chapter,
+    primarySource: Source,
+    novelId: string,
+    profile: LocalSourceProfile
+  ): Promise<{ content: string; provider: string; path: string }> {
+    const chapterPath = chapter.path || chapter.url;
+    if (!chapterPath) {
+      throw new Error('Chapter path is missing.');
+    }
+    const domain = extractDomain(primarySource.site);
+
+    try {
+      const content = await scheduleDomain(domain, () =>
+        this.fetchLocalChapterWithBlockRetries(
+          primarySource,
+          chapterPath,
+          domain,
+          novelId,
+          profile
+        )
+      );
+      return { content, provider: primarySource.id, path: chapterPath };
+    } catch (primaryErr) {
+      if (this.cancelFlags.get(novelId)) throw primaryErr;
+
+      // 2. Same chapter number on another configured source.
+      const alternate = await this.tryAlternateSources(
+        novel,
+        chapter,
+        primarySource.id,
+        novelId
+      );
+      if (alternate) return alternate;
+
+      // 3. Last step: render the original chapter URL in a hidden WebView.
+      if (isBlockedError(primaryErr)) {
+        const webviewContent = await this.tryWebViewChapter(primarySource, chapterPath);
+        if (webviewContent) {
+          return { content: webviewContent, provider: primarySource.id, path: chapterPath };
+        }
+      }
+
+      throw primaryErr;
+    }
   }
 
   private async downloadWithLocalSource(
@@ -196,23 +502,6 @@ class DownloadManagerService {
 
     const profile = getLocalProfile(source.id);
 
-    // Rate-limit gate ensuring at least `requestDelayMs` between request starts
-    // across all concurrent workers for this source.
-    let lastDispatchAt = 0;
-    let gateChain: Promise<void> = Promise.resolve();
-
-    const waitForRateLimitSlot = async () => {
-      const current = gateChain.then(async () => {
-        const elapsed = Date.now() - lastDispatchAt;
-        if (elapsed < profile.requestDelayMs) {
-          await new Promise((r) => setTimeout(r, profile.requestDelayMs - elapsed));
-        }
-        lastDispatchAt = Date.now();
-      });
-      gateChain = current.catch(() => {});
-      await current;
-    };
-
     const worker = async () => {
       while (true) {
         if ((await this.waitIfPaused(novelId, task)) === 'cancelled') {
@@ -226,13 +515,10 @@ class DownloadManagerService {
         }
 
         const chapter = pendingChapters[idx];
-        const chapterPath = chapter.path || chapter.url;
 
         task.status = 'downloading';
         task.currentChapterTitle = chapter.title || `Chapter ${chapter.serial}`;
         this.notify(task);
-
-        await waitForRateLimitSlot();
 
         if ((await this.waitIfPaused(novelId, task)) === 'cancelled') {
           cancelled = true;
@@ -240,21 +526,21 @@ class DownloadManagerService {
         }
 
         try {
-          if (!chapterPath) {
-            throw new Error('Chapter path is missing.');
-          }
-          const content = await this.fetchLocalChapterWithRetries(
+          // Per-domain serialization, block-aware retries, alternate-source and
+          // hidden-WebView fallbacks are handled inside this call.
+          const result = await this.fetchChapterWithFallbacks(
+            novel,
+            chapter,
             source,
-            chapterPath,
             novelId,
             profile
           );
           await saveChapter({
             ...chapter,
-            provider: source.id,
-            path: chapterPath,
-            content,
-            wordsCount: countWords(content),
+            provider: result.provider,
+            path: result.path,
+            content: result.content,
+            wordsCount: countWords(result.content),
             isDownloaded: true,
           });
           delete existingErrors[chapter.id];
@@ -582,7 +868,7 @@ class DownloadManagerService {
       return existing;
     }
 
-    const effectiveProvider = chapter.provider || novel.provider || 'lncrawl';
+    let effectiveProvider = chapter.provider || novel.provider || 'lncrawl';
     const localSource = getSource(effectiveProvider);
 
     try {
@@ -592,17 +878,18 @@ class DownloadManagerService {
 
       if (!content) {
         if (localSource) {
-          const chPath = chapter.path || chapter.url;
-          if (!chPath) {
-            throw new Error('Chapter path is missing.');
-          }
-          content = await this.fetchLocalChapterWithRetries(
+          const result = await this.fetchChapterWithFallbacks(
+            novel,
+            chapter,
             localSource,
-            chPath,
-            undefined,
+            novel.id,
             getLocalProfile(localSource.id)
           );
+          content = result.content;
           fetchedWordCount = countWords(content);
+          // Persist using the source that actually produced the content.
+          effectiveProvider = result.provider;
+          chapter = { ...chapter, path: result.path };
         } else {
           const fetched = await LNCrawlService.fetchChapterContent(chapter.id);
           content = fetched.content;

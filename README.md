@@ -1,6 +1,6 @@
 # Paper - Light Novel Reader
 
-A React Native (Expo) light novel reader for Android with offline downloads, built-in reader and reading progress. Version 2.10.0.
+A React Native (Expo) light novel reader for Android with offline downloads, built-in reader and reading progress. Version 3.0.0.
 
 ## Stack
 

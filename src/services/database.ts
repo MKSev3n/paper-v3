@@ -475,20 +475,23 @@ export async function getDownloadedNovels(): Promise<Novel[]> {
 
 export async function deleteNovel(id: string): Promise<void> {
   if (Platform.OS === 'web') {
-    const [novelsMap, chaptersMap, progressMap] = await Promise.all([
+    const [novelsMap, chaptersMap, progressMap, sourceMap] = await Promise.all([
       readWebMap<Novel>(WEB_KEYS.NOVELS),
       readWebMap<Chapter>(WEB_KEYS.CHAPTERS),
       readWebMap<ReadingProgress>(WEB_KEYS.PROGRESS),
+      readWebMap<any>(WEB_KEYS.SOURCE_MAP),
     ]);
     delete novelsMap[id];
     delete progressMap[id];
     for (const [cid, ch] of Object.entries(chaptersMap)) {
       if (ch.novelId === id) delete chaptersMap[cid];
     }
+    delete sourceMap[id];
     await Promise.all([
       writeWebMap(WEB_KEYS.NOVELS, novelsMap),
       writeWebMap(WEB_KEYS.CHAPTERS, chaptersMap),
       writeWebMap(WEB_KEYS.PROGRESS, progressMap),
+      writeWebMap(WEB_KEYS.SOURCE_MAP, sourceMap),
     ]);
     return;
   }

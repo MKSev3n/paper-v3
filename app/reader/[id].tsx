@@ -4,6 +4,7 @@ import {
   Text,
   StyleSheet,
   ScrollView,
+  FlatList,
   Pressable,
   ActivityIndicator,
   Modal,
@@ -90,7 +91,8 @@ export default function ReaderScreen() {
 
   // Safe-area insets for the bottom chrome bar and scroll padding
   const insets = useSafeAreaInsets();
-  const bottomBarHeight = 56 + insets.bottom + 8;
+  const bottomBarHeight = 80 + insets.bottom;
+  const topBarHeight = 56 + insets.top;
 
   const [chapter, setChapter] = useState<Chapter | null>(null);
   const [novel, setNovel] = useState<Novel | null>(null);
@@ -106,6 +108,7 @@ export default function ReaderScreen() {
     fontFamily: 'serif',
   });
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
+  const [chapterMenuVisible, setChapterMenuVisible] = useState(false);
 
   // Chrome UI Visibility (Header & Footer)
   const [barsVisible, setBarsVisible] = useState(true);
@@ -438,20 +441,20 @@ export default function ReaderScreen() {
       style={[styles.container, { backgroundColor: currentTheme.background }]}
       edges={['left', 'right']}
     >
-      {/* Bottom Bar */}
+      {/* Top Bar */}
       <Animated.View
         style={[
-          styles.bottomBar,
+          styles.topBar,
           {
             backgroundColor: currentTheme.surface,
-            borderTopColor: currentTheme.border,
-            paddingBottom: insets.bottom + 8,
+            borderBottomColor: currentTheme.border,
+            paddingTop: insets.top + 4,
             opacity: barsAnim,
             transform: [
               {
                 translateY: barsAnim.interpolate({
                   inputRange: [0, 1],
-                  outputRange: [bottomBarHeight, 0],
+                  outputRange: [-topBarHeight, 0],
                 }),
               },
             ],
@@ -466,7 +469,44 @@ export default function ReaderScreen() {
           <Ionicons name="arrow-back" size={22} color={currentTheme.text} />
         </Pressable>
 
-        <View style={styles.topBarTitleContainer}>
+        <Text
+          style={[styles.topBarChapterTitleCenter, { color: currentTheme.text }]}
+          numberOfLines={1}
+        >
+          {chapter.title}
+        </Text>
+
+        <Pressable
+          style={styles.barIconButton}
+          onPress={() => setChapterMenuVisible(true)}
+          hitSlop={10}
+        >
+          <Ionicons name="menu" size={22} color={currentTheme.text} />
+        </Pressable>
+      </Animated.View>
+
+      {/* Bottom Bar */}
+      <Animated.View
+        style={[
+          styles.bottomBar,
+          {
+            backgroundColor: currentTheme.surface,
+            borderTopColor: currentTheme.border,
+            paddingBottom: insets.bottom + 8,
+            paddingTop: 12,
+            opacity: barsAnim,
+            transform: [
+              {
+                translateY: barsAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [bottomBarHeight, 0],
+                }),
+              },
+            ],
+          },
+        ]}
+      >
+        <View style={styles.bottomBarTitleContainer}>
           <Text style={[styles.topBarNovelTitle, { color: currentTheme.textSecondary }]} numberOfLines={1}>
             {novel?.title || 'Novel Reader'}
           </Text>
@@ -506,7 +546,7 @@ export default function ReaderScreen() {
         style={styles.scrollArea}
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingTop: insets.top + 12, paddingBottom: bottomBarHeight + 24 },
+          { paddingTop: topBarHeight + 12, paddingBottom: bottomBarHeight + 24 },
         ]}
         onLayout={handleScrollViewLayout}
         onContentSizeChange={handleContentSizeChange}
@@ -606,6 +646,89 @@ export default function ReaderScreen() {
           </Pressable>
         </View>
       </ScrollView>
+
+      {/* Chapter List Menu */}
+      <Modal
+        visible={chapterMenuVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setChapterMenuVisible(false)}
+      >
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => setChapterMenuVisible(false)}
+        >
+          <Pressable
+            style={[styles.modalSheet, { backgroundColor: currentTheme.surface, borderColor: currentTheme.border }]}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <View style={styles.modalHeader}>
+              <Text style={[styles.modalTitle, { color: currentTheme.text }]}>Chapters</Text>
+              <Pressable onPress={() => setChapterMenuVisible(false)} hitSlop={10}>
+                <Ionicons name="close" size={20} color={currentTheme.textSecondary} />
+              </Pressable>
+            </View>
+            <FlatList
+              key="chapter-menu-list"
+              data={chaptersList}
+              keyExtractor={(item) => String(item.id)}
+              initialScrollIndex={Math.max(0, currentIndex)}
+              getItemLayout={(_, index) => ({
+                length: 56,
+                offset: 56 * index,
+                index,
+              })}
+              windowSize={10}
+              removeClippedSubviews
+              maxToRenderPerBatch={20}
+              updateCellsBatchingPeriod={50}
+              onScrollToIndexFailed={() => {}}
+              renderItem={({ item, index }) => {
+                const isCurrent = item.id === chapter?.id;
+                return (
+                  <Pressable
+                    style={[
+                      styles.chapterRow,
+                      isCurrent && { backgroundColor: currentTheme.surfaceRaised },
+                    ]}
+                    onPress={() => {
+                      setChapterMenuVisible(false);
+                      navigateToChapter(item);
+                    }}
+                  >
+                    <Text style={[styles.chapterRowNumber, { color: currentTheme.textSecondary }]}>
+                      {index + 1}
+                    </Text>
+                    <Text
+                      style={[styles.chapterRowTitle, { color: isCurrent ? currentTheme.accent : currentTheme.text }]}
+                      numberOfLines={1}
+                    >
+                      {item.title}
+                    </Text>
+                    <Ionicons
+                      name={
+                        item.isDownloaded
+                          ? 'checkmark-circle'
+                          : item.status === 'failed'
+                          ? 'alert-circle'
+                          : 'cloud-outline'
+                      }
+                      size={18}
+                      color={
+                        item.isDownloaded
+                          ? Colors.success
+                          : item.status === 'failed'
+                          ? '#ef4444'
+                          : currentTheme.textSecondary
+                      }
+                    />
+                  </Pressable>
+                );
+              }}
+            />
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* Reader Settings Modal */}
       <Modal
@@ -788,6 +911,48 @@ const styles = StyleSheet.create({
   backButtonSimpleText: {
     fontSize: 13,
   },
+  topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 8,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    zIndex: 10,
+  },
+  topBarChapterTitleCenter: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginHorizontal: 8,
+  },
+  bottomBarTitleContainer: {
+    flex: 1,
+    marginHorizontal: 8,
+  },
+  chapterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 8,
+    gap: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+  },
+  chapterRowNumber: {
+    width: 32,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  chapterRowTitle: {
+    flex: 1,
+    fontSize: 14,
+  },
   bottomBar: {
     position: 'absolute',
     bottom: 0,
@@ -802,8 +967,8 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   barIconButton: {
-    width: 36,
-    height: 36,
+    width: 48,
+    height: 48,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 6,

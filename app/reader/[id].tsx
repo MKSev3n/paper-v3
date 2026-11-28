@@ -709,7 +709,7 @@ export default function ReaderScreen() {
                       name={
                         item.isDownloaded
                           ? 'checkmark-circle'
-                          : item.status === 'failed'
+                          : item.isAvailable === false
                           ? 'alert-circle'
                           : 'cloud-outline'
                       }
@@ -717,7 +717,7 @@ export default function ReaderScreen() {
                       color={
                         item.isDownloaded
                           ? Colors.success
-                          : item.status === 'failed'
+                          : item.isAvailable === false
                           ? '#ef4444'
                           : currentTheme.textSecondary
                       }

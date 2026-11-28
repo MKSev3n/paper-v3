@@ -38,6 +38,7 @@ export const ReaderThemes: Record<
     name: string;
     background: string;
     surface: string;
+    surfaceRaised: string;
     border: string;
     text: string;
     textSecondary: string;
@@ -48,6 +49,7 @@ export const ReaderThemes: Record<
     name: 'Dark',
     background: '#0D0F14',
     surface: '#161922',
+    surfaceRaised: '#1E2330',
     border: '#252A3A',
     text: '#E5E7EB',
     textSecondary: '#9CA3AF',
@@ -57,6 +59,7 @@ export const ReaderThemes: Record<
     name: 'Sepia',
     background: '#F4ECD8',
     surface: '#EAE1CC',
+    surfaceRaised: '#E0D5BC',
     border: '#D8CEB6',
     text: '#433422',
     textSecondary: '#7A6248',
@@ -66,6 +69,7 @@ export const ReaderThemes: Record<
     name: 'Paper Light',
     background: '#FAF8F5',
     surface: '#FFFFFF',
+    surfaceRaised: '#F1F2F4',
     border: '#E5E7EB',
     text: '#1F2937',
     textSecondary: '#6B7280',

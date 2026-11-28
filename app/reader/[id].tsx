@@ -14,6 +14,7 @@ import {
   Dimensions,
   Alert,
   LayoutChangeEvent,
+  PanResponder,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -111,6 +112,7 @@ export default function ReaderScreen() {
   });
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
   const [chapterMenuVisible, setChapterMenuVisible] = useState(false);
+  const [toastText, setToastText] = useState<string | null>(null);
 
   // Chrome UI Visibility (Header & Footer)
   const [barsVisible, setBarsVisible] = useState(true);
@@ -381,6 +383,10 @@ export default function ReaderScreen() {
   const navigateToChapter = (target: Chapter | null) => {
     if (!target) return;
     flushPendingProgress();
+    if (settings.chapterNavigation === 'swipe') {
+      setToastText(`Chapter ${target.serial}`);
+      setTimeout(() => setToastText(null), 1200);
+    }
     router.replace({
       pathname: '/reader/[id]',
       params: { id: target.id, novelId: novelId || chapter?.novelId },
@@ -409,6 +415,21 @@ export default function ReaderScreen() {
 
   // Format content paragraphs cleanly (handles both HTML and plain text)
   const paragraphs = parseChapterParagraphs(chapter?.content || '');
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_evt, g) =>
+          settings.chapterNavigation === 'swipe' &&
+          Math.abs(g.dx) > 80 &&
+          Math.abs(g.dx) > 2 * Math.abs(g.dy),
+        onPanResponderRelease: (_evt, g) => {
+          if (g.dx > 0) navigateToChapter(prevChapter);
+          else if (g.dx < 0) navigateToChapter(nextChapter);
+        },
+      }),
+    [settings.chapterNavigation, prevChapter, nextChapter]
+  );
 
   if (loading) {
     return (
@@ -524,6 +545,26 @@ export default function ReaderScreen() {
           </Text>
         </View>
 
+        <View style={styles.chapterNavActions}>
+          <Pressable
+            style={[styles.barIconButton, !prevChapter && { opacity: 0.4 }]}
+            onPress={() => navigateToChapter(prevChapter)}
+            disabled={!prevChapter}
+            accessibilityLabel="Previous chapter"
+            hitSlop={10}
+          >
+            <Ionicons name="chevron-back" size={22} color={currentTheme.text} />
+          </Pressable>
+          <Pressable
+            style={[styles.barIconButton, !nextChapter && { opacity: 0.4 }]}
+            onPress={() => navigateToChapter(nextChapter)}
+            disabled={!nextChapter}
+            accessibilityLabel="Next chapter"
+            hitSlop={10}
+          >
+            <Ionicons name="chevron-forward" size={22} color={currentTheme.text} />
+          </Pressable>
+        </View>
         <View style={styles.topBarActions}>
           {/* Download offline button */}
           <Pressable
@@ -552,6 +593,7 @@ export default function ReaderScreen() {
       {/* Main Reading Text ScrollView */}
       <ScrollView
         ref={scrollViewRef}
+        {...panResponder.panHandlers}
         style={styles.scrollArea}
         contentContainerStyle={[
           styles.scrollContent,
@@ -739,6 +781,12 @@ export default function ReaderScreen() {
         </Pressable>
       </Modal>
 
+      {toastText && (
+        <View style={styles.toast}>
+          <Text style={styles.toastText}>{toastText}</Text>
+        </View>
+      )}
+
       {/* Reader Settings Modal */}
       <Modal
         visible={settingsModalVisible}
@@ -848,6 +896,34 @@ export default function ReaderScreen() {
                       ]}
                     >
                       {sp.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            {/* Chapter Navigation Mode */}
+            <Text style={styles.settingGroupLabel}>CHAPTER NAVIGATION</Text>
+            <View style={styles.spacingRow}>
+              {(['scroll', 'swipe'] as const).map((mode) => {
+                const isSelected = (settings.chapterNavigation || 'scroll') === mode;
+                const label = mode === 'scroll' ? 'Scroll' : 'Swipe';
+                return (
+                  <Pressable
+                    key={mode}
+                    style={[
+                      styles.spacingOption,
+                      isSelected && styles.spacingOptionSelected,
+                    ]}
+                    onPress={() => updateSetting('chapterNavigation', mode)}
+                  >
+                    <Text
+                      style={[
+                        styles.spacingOptionText,
+                        isSelected && styles.spacingOptionTextSelected,
+                      ]}
+                    >
+                      {label}
                     </Text>
                   </Pressable>
                 );
@@ -1012,6 +1088,25 @@ const styles = StyleSheet.create({
   topBarActions: {
     flexDirection: 'row',
     gap: 4,
+  },
+  chapterNavActions: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  toast: {
+    position: 'absolute',
+    bottom: 120,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    zIndex: 20,
+  },
+  toastText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   scrollArea: {
     flex: 1,

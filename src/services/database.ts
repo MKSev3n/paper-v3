@@ -69,6 +69,60 @@ async function writeWebMap<T>(key: string, map: Record<string, T>): Promise<void
   await AsyncStorage.setItem(key, JSON.stringify(map));
 }
 
+// ==========================================
+// WRITE SERIALIZATION
+// expo-sqlite can reject with "NativeStatement.finalizeAsync" when writes or
+// exclusive transactions overlap on the same connection (common during chapter
+// downloads with concurrent workers). Every write is routed through a single
+// promise chain so only one write/transaction runs at a time, and a failed
+// write is retried once after a short delay.
+// ==========================================
+
+const WRITE_RETRY_DELAY_MS = 200;
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withWriteRetry<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (err) {
+    await waitMs(WRITE_RETRY_DELAY_MS);
+    return operation();
+  }
+}
+
+/** Serialize a write (or exclusive transaction) behind all other writes. */
+function enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
+  const result = writeQueue.then(
+    () => withWriteRetry(operation),
+    () => withWriteRetry(operation)
+  );
+  // Keep the chain progressing even if this write ultimately fails.
+  writeQueue = result.catch(() => {});
+  return result;
+}
+
+/** A queued write whose failure is swallowed (used for best-effort status). */
+function runWrite(
+  db: SQLite.SQLiteDatabase,
+  sql: string,
+  params: unknown[] = []
+): Promise<unknown> {
+  return enqueueWrite(() => db.runAsync(sql, params as any));
+}
+
+/** Best-effort queued write: retries once, then never rejects. */
+function runWriteBestEffort(
+  db: SQLite.SQLiteDatabase,
+  sql: string,
+  params: unknown[] = []
+): Promise<unknown> {
+  return enqueueWrite(() => db.runAsync(sql, params as any)).catch(() => {});
+}
+
 export async function getAllChaptersForWeb(): Promise<Chapter[]> {
   const map = await readWebMap<Chapter>(WEB_KEYS.CHAPTERS);
   return Object.values(map).map((ch) => ({
@@ -223,7 +277,8 @@ export async function upsertNovel(novel: Novel): Promise<void> {
   const db = await getDatabase();
   const genresJson = JSON.stringify(novel.genres || []);
 
-  await db.runAsync(
+  await runWrite(
+    db,
     `INSERT INTO novels (id, title, author, synopsis, cover_url, local_cover_path, genres, status, total_chapters, is_downloaded, provider, path, source_domain, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
@@ -358,9 +413,12 @@ export async function deleteNovel(id: string): Promise<void> {
   }
 
   const db = await getDatabase();
-  await db.runAsync(`DELETE FROM chapters WHERE novel_id = ?`, [id]);
-  await db.runAsync(`DELETE FROM reading_progress WHERE novel_id = ?`, [id]);
-  await db.runAsync(`DELETE FROM novels WHERE id = ?`, [id]);
+  await runWrite(
+    db,`DELETE FROM chapters WHERE novel_id = ?`, [id]);
+  await runWrite(
+    db,`DELETE FROM reading_progress WHERE novel_id = ?`, [id]);
+  await runWrite(
+    db,`DELETE FROM novels WHERE id = ?`, [id]);
 }
 
 // ==========================================
@@ -396,7 +454,8 @@ export async function saveChapter(chapter: Chapter): Promise<void> {
 
   const db = await getDatabase();
 
-  await db.runAsync(
+  await runWrite(
+    db,
     `INSERT INTO chapters (id, novel_id, serial, title, content, is_downloaded, provider, path, words_count, release_date)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
@@ -423,7 +482,12 @@ export async function saveChapter(chapter: Chapter): Promise<void> {
   );
 
   if (hasContent) {
-    await db.runAsync(`UPDATE novels SET is_downloaded = 1 WHERE id = ?`, [chapter.novelId]);
+    // Best-effort: a failed status write must never mark the chapter as failed.
+    await runWriteBestEffort(
+      db,
+      `UPDATE novels SET is_downloaded = 1 WHERE id = ?`,
+      [chapter.novelId]
+    );
   }
 }
 
@@ -447,8 +511,9 @@ export async function saveChaptersBatch(chapters: Chapter[]): Promise<void> {
   }
 
   const db = await getDatabase();
-  await db.withExclusiveTransactionAsync(async (txn) => {
-    for (const ch of chapters) {
+  await enqueueWrite(() =>
+    db.withExclusiveTransactionAsync(async (txn) => {
+      for (const ch of chapters) {
       const hasContent = Boolean(ch.content && ch.content.trim().length > 0);
       const provider = ch.provider || 'lncrawl';
       const chapterPath = ch.path || ch.url || null;
@@ -481,7 +546,8 @@ export async function saveChaptersBatch(chapters: Chapter[]): Promise<void> {
         await txn.runAsync(`UPDATE novels SET is_downloaded = 1 WHERE id = ?`, [ch.novelId]);
       }
     }
-  });
+    })
+  );
 }
 
 export async function getChapterById(id: string): Promise<Chapter | null> {
@@ -590,11 +656,13 @@ export async function deleteDownloadedChapters(novelId: string): Promise<void> {
   }
 
   const db = await getDatabase();
-  await db.runAsync(
+  await runWrite(
+    db,
     `UPDATE chapters SET content = NULL, is_downloaded = 0 WHERE novel_id = ?`,
     [novelId]
   );
-  await db.runAsync(`UPDATE novels SET is_downloaded = 0 WHERE id = ?`, [novelId]);
+  await runWrite(
+    db,`UPDATE novels SET is_downloaded = 0 WHERE id = ?`, [novelId]);
 }
 
 // ==========================================
@@ -610,7 +678,8 @@ export async function saveReadingProgress(progress: ReadingProgress): Promise<vo
   }
 
   const db = await getDatabase();
-  await db.runAsync(
+  await runWrite(
+    db,
     `INSERT INTO reading_progress (novel_id, chapter_id, chapter_title, chapter_serial, scroll_offset, scroll_percentage, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(novel_id) DO UPDATE SET

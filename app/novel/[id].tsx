@@ -571,7 +571,7 @@ export default function NovelDetailScreen() {
               </Text>
             )}
             {chapterErr && !item.isDownloaded && (
-              <Text style={styles.chapterErrorBadge} numberOfLines={1}>
+              <Text style={styles.chapterErrorBadge}>
                 Failed: {chapterErr}
               </Text>
             )}

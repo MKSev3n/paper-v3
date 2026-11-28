@@ -91,6 +91,10 @@ export default function ReaderScreen() {
   }>();
 
   const scrollViewRef = useRef<ScrollView>(null);
+  const chapterListRef = useRef<FlatList<Chapter>>(null);
+
+  // Chapter list item fixed height (paddingVertical 14 * 2 + text line height ~24 + icon 18 + gaps)
+  const ITEM_HEIGHT = 56;
 
   // Safe-area insets for the bottom chrome bar and scroll padding
   const insets = useSafeAreaInsets();
@@ -392,6 +396,24 @@ export default function ReaderScreen() {
       params: { id: target.id, novelId: novelId || chapter?.novelId },
     });
   };
+
+  const handleChapterListContentSizeChange = useCallback(() => {
+    if (chapterListRef.current && currentIndex >= 0) {
+      chapterListRef.current.scrollToIndex({
+        index: currentIndex,
+        viewPosition: 0.3,
+        animated: false,
+      });
+    }
+  }, [currentIndex]);
+
+  const handleScrollToIndexFailed = useCallback(
+    (info: { index: number; highestMeasuredFrameIndex: number; averageItemLength: number }) => {
+      const targetOffset = info.index * ITEM_HEIGHT;
+      chapterListRef.current?.scrollToOffset({ offset: targetOffset, animated: false });
+    },
+    []
+  );
 
   const handleDownloadCurrentChapter = async () => {
     if (!chapter) return;
@@ -721,19 +743,22 @@ export default function ReaderScreen() {
             </View>
             <FlatList
               key="chapter-menu-list"
+              ref={chapterListRef}
               data={chaptersList}
               keyExtractor={(item) => String(item.id)}
-              initialScrollIndex={Math.max(0, currentIndex)}
               getItemLayout={(_, index) => ({
-                length: 56,
-                offset: 56 * index,
+                length: ITEM_HEIGHT,
+                offset: ITEM_HEIGHT * index,
                 index,
               })}
               windowSize={10}
               removeClippedSubviews
               maxToRenderPerBatch={20}
               updateCellsBatchingPeriod={50}
-              onScrollToIndexFailed={() => {}}
+              onScrollToIndexFailed={handleScrollToIndexFailed}
+              onContentSizeChange={handleChapterListContentSizeChange}
+              contentContainerStyle={styles.chapterListContent}
+              style={styles.chapterList}
               renderItem={({ item, index }) => {
                 const isCurrent = item.id === chapter?.id;
                 return (
@@ -1037,7 +1062,7 @@ const styles = StyleSheet.create({
   chapterRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 14,
+    height: 56,
     paddingHorizontal: 8,
     gap: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
@@ -1181,6 +1206,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 20,
     paddingBottom: 36,
+  },
+  chapterList: {
+    flex: 1,
+  },
+  chapterListContent: {
+    paddingBottom: 20,
   },
   modalHeader: {
     flexDirection: 'row',

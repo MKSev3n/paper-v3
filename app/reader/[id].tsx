@@ -12,6 +12,7 @@ import {
   NativeScrollEvent,
   Animated,
   Dimensions,
+  useWindowDimensions,
   Alert,
   LayoutChangeEvent,
   PanResponder,
@@ -98,6 +99,9 @@ export default function ReaderScreen() {
 
   // Safe-area insets for the bottom chrome bar and scroll padding
   const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
+  // Chapters sheet occupies the bottom 75% of the screen
+  const chapterSheetHeight = Math.round(windowHeight * 0.75);
   const bottomBarHeight = 80 + insets.bottom;
   const topBarHeight = 56 + insets.top;
 
@@ -732,7 +736,14 @@ export default function ReaderScreen() {
           onPress={() => setChapterMenuVisible(false)}
         >
           <Pressable
-            style={[styles.modalSheet, { backgroundColor: currentTheme.surface, borderColor: currentTheme.border }]}
+            style={[
+              styles.chapterSheet,
+              {
+                height: chapterSheetHeight,
+                backgroundColor: currentTheme.surface,
+                borderColor: currentTheme.border,
+              },
+            ]}
             onPress={(e) => e.stopPropagation()}
           >
             <View style={styles.modalHeader}>
@@ -1221,6 +1232,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     padding: 20,
     paddingBottom: 36,
+  },
+  chapterSheet: {
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    borderWidth: 1,
+    padding: 20,
+    paddingBottom: 20,
   },
   chapterList: {
     flex: 1,

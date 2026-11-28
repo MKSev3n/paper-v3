@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   fontFamily: 'serif',
   chapterNavigation: 'scroll',
   followsAppTheme: false,
+  viewMode: 'grid',
 };
 
 export const DEFAULT_DISCOVER_PROVIDERS: SearchProviderId[] = [

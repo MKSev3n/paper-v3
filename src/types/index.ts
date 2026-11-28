@@ -69,6 +69,7 @@ export interface ReaderSettings {
   fontFamily: 'default' | 'serif' | 'monospace';
   chapterNavigation?: 'scroll' | 'swipe';
   followsAppTheme?: boolean; // when true, reader uses Paper theme in light and Night in dark
+  viewMode?: 'grid' | 'list';
 }
 
 export type DownloadStatus = 'idle' | 'pending' | 'downloading' | 'completed' | 'failed' | 'paused';

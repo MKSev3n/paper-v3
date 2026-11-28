@@ -16,7 +16,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Colors } from '../../src/theme/colors';
 import { deleteLocalCover } from '../../src/services/fileStorage';
 import { DownloadManager } from '../../src/services/downloadManager';
-import { Novel, ReadingProgress } from '../../src/types';
+import { Novel, ReadingProgress, ReaderSettings } from '../../src/types';
 import {
   getAllNovels,
   getDownloadedNovels,
@@ -25,6 +25,7 @@ import {
   deleteNovel,
   deleteDownloadedChapters,
 } from '../../src/services/database';
+import { getReaderSettings, saveReaderSettings } from '../../src/services/storage';
 
 const { width } = Dimensions.get('window');
 const COLUMN_WIDTH = (width - 48) / 2;
@@ -40,6 +41,7 @@ export default function LibraryScreen() {
     novel: Novel;
     progress: ReadingProgress;
   } | null>(null);
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
 
   const loadLibraryData = useCallback(async () => {
     try {
@@ -82,6 +84,12 @@ export default function LibraryScreen() {
     }, [loadLibraryData])
   );
 
+  useEffect(() => {
+    getReaderSettings().then((settings: ReaderSettings) => {
+      setViewMode(settings.viewMode || 'grid');
+    });
+  }, []);
+
   const onRefresh = async () => {
     setRefreshing(true);
     await loadLibraryData();
@@ -118,6 +126,25 @@ export default function LibraryScreen() {
           <Text style={styles.brandTitle}>Paper</Text>
           <Text style={styles.brandBadge}>v3.0</Text>
         </View>
+        <View style={styles.headerActions} />
+        <Pressable
+          style={styles.viewModeButton}
+          onPress={() => {
+            const next = viewMode === 'grid' ? 'list' : 'grid';
+            setViewMode(next);
+            getReaderSettings().then((s: ReaderSettings) =>
+              saveReaderSettings({ ...s, viewMode: next })
+            );
+          }}
+          hitSlop={12}
+          accessibilityLabel={viewMode === 'grid' ? 'Switch to list view' : 'Switch to grid view'}
+        >
+          <Ionicons
+            name={viewMode === 'grid' ? 'list-outline' : 'grid-outline'}
+            size={22}
+            color={Colors.text}
+          />
+        </Pressable>
         <Pressable
           style={styles.searchIconButton}
           onPress={() => router.push('/(tabs)/discover')}
@@ -289,6 +316,56 @@ export default function LibraryScreen() {
     );
   };
 
+  const renderNovelItemList = ({ item }: { item: Novel }) => {
+    const coverUri = item.localCoverPath || item.coverUrl;
+    const isOfflineAvailable =
+      item.isDownloaded || (item.downloadedChaptersCount ?? 0) > 0;
+    const totalChapters = item.totalChapters || 0;
+    const readChapters = item.downloadedChaptersCount ?? 0;
+
+    return (
+      <Pressable
+        style={({ pressed }) => [styles.novelListItem, pressed && styles.cardPressed]}
+        onPress={() =>
+          router.push({
+            pathname: '/novel/[id]',
+            params: { id: item.id },
+          })
+        }
+        onLongPress={() => handleRemoveBook(item)}
+      >
+        <Image
+          source={
+            coverUri
+              ? { uri: coverUri }
+              : require('../../assets/icon.png')
+          }
+          style={styles.listCover}
+          resizeMode="cover"
+        />
+        <View style={styles.listInfo}>
+          <Text style={styles.listTitle} numberOfLines={2}>
+            {item.title}
+          </Text>
+          <Text style={styles.listAuthor} numberOfLines={1}>
+            {item.author}
+          </Text>
+          {totalChapters > 0 && (
+            <Text style={styles.listProgress}>
+              {readChapters} / {totalChapters} chapters
+            </Text>
+          )}
+        </View>
+        {isOfflineAvailable && (
+          <View style={styles.listDownloadedBadge}>
+            <Ionicons name="checkmark-circle" size={14} color="#10B981" />
+            <Text style={styles.listDownloadedBadgeText}>Downloaded</Text>
+          </View>
+        )}
+      </Pressable>
+    );
+  };
+
   const renderEmpty = () => (
     <View style={styles.emptyContainer}>
       <Ionicons name="book-outline" size={56} color={Colors.surfaceLight} />
@@ -311,9 +388,10 @@ export default function LibraryScreen() {
       <FlatList
         data={novels}
         keyExtractor={(item) => item.id}
-        renderItem={renderNovelItem}
-        numColumns={2}
-        columnWrapperStyle={novels.length > 0 ? styles.columnWrapper : undefined}
+        renderItem={viewMode === 'grid' ? renderNovelItem : renderNovelItemList}
+        key={`lib-${viewMode}`}
+        numColumns={viewMode === 'grid' ? 2 : 1}
+        columnWrapperStyle={viewMode === 'grid' && novels.length > 0 ? styles.columnWrapper : undefined}
         ListHeaderComponent={renderHeader}
         ListEmptyComponent={renderEmpty}
         contentContainerStyle={styles.listContent}
@@ -601,5 +679,77 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     color: '#0D0F14',
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  viewModeButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: Colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  novelListItem: {
+    flexDirection: 'row',
+    backgroundColor: Colors.surface,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: 12,
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 8,
+  },
+  listCover: {
+    width: 56,
+    height: 76,
+    borderRadius: 6,
+    backgroundColor: Colors.surfaceLight,
+  },
+  listInfo: {
+    flex: 1,
+    justifyContent: 'center',
+    minWidth: 0,
+  },
+  listTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: Colors.text,
+    lineHeight: 20,
+    maxHeight: 40,
+  },
+  listAuthor: {
+    fontSize: 12,
+    color: Colors.textMuted,
+    marginTop: 2,
+  },
+  listProgress: {
+    fontSize: 11,
+    color: Colors.primary,
+    marginTop: 4,
+    fontWeight: '600',
+  },
+  listDownloadedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+    gap: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+    marginLeft: 8,
+  },
+  listDownloadedBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#10B981',
   },
 });

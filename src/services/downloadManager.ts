@@ -18,6 +18,8 @@ import {
   getChapterById,
   getDownloadedChaptersForNovel,
   getNovelById,
+  getSiblingSourceEntry,
+  setSiblingSourceEntry,
 } from './database';
 import { downloadCoverImage } from './fileStorage';
 import {
@@ -104,7 +106,7 @@ const DOMAIN_MIN_GAP_MS = 1000;
 const DOMAIN_MAX_GAP_MS = 2500;
 const DOMAIN_BLOCK_PAUSE_MIN_MS = 20000;
 const DOMAIN_BLOCK_PAUSE_MAX_MS = 30000;
-const BLOCK_MAX_RETRIES = 3;
+const BLOCK_MAX_RETRIES = 2;
 const BLOCK_RETRY_MIN_MS = 3000;
 const BLOCK_RETRY_MAX_MS = 6000;
 
@@ -235,18 +237,39 @@ function pickBestNovelMatch<T extends { title: string }>(
   return bestScore >= 2 ? best : null;
 }
 
-/** Find the equivalent chapter on another source by title, then by serial. */
+/** Loose title similarity: true when normalized titles are equal or one contains the other. */
+function titlesAreSimilar(a?: string, b?: string): boolean {
+  const na = normalizeTitle(a);
+  const nb = normalizeTitle(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  const setA = new Set(na.split(' '));
+  const setB = new Set(nb.split(' '));
+  let inter = 0;
+  setA.forEach((t) => {
+    if (setB.has(t)) inter += 1;
+  });
+  return inter >= 2;
+}
+
+/**
+ * Find the equivalent chapter on another source by chapter number (serial), then
+ * verify the titles are similar before accepting. Returns null if there is no
+ * number match or the titles don't line up (so the caller skips that source).
+ */
 function findEquivalentChapter<T extends { title: string; index: number }>(
   chapters: T[],
   chapter: Chapter
 ): T | null {
-  const target = normalizeTitle(chapter.title);
-  if (target) {
-    const byTitle = chapters.find((c) => normalizeTitle(c.title) === target);
-    if (byTitle) return byTitle;
-  }
   const byIndex = chapters.find((c) => c.index === chapter.serial - 1);
-  return byIndex || null;
+  if (byIndex) {
+    if (titlesAreSimilar(chapter.title, byIndex.title)) {
+      return byIndex;
+    }
+    return null;
+  }
+  return null;
 }
 
 /** Extract readable chapter text from rendered chapter HTML. */
@@ -394,49 +417,88 @@ class DownloadManagerService {
 
   /**
    * After the primary source's retries fail, try the same chapter number on
-   * another configured source for the same novel (matched by title/serial).
+   * the other configured sources. Domains currently in cooldown are skipped.
+   * The novel->sibling mapping per source is cached in SQLite so the title
+   * search happens only once. Returns the first success plus any per-source
+   * error strings (for the combined failure message).
    */
   private async tryAlternateSources(
     novel: Novel,
     chapter: Chapter,
     failedProviderId: string,
     novelId: string
-  ): Promise<{ content: string; provider: string; path: string } | null> {
+  ): Promise<{
+    result: { content: string; provider: string; path: string } | null;
+    errors: string[];
+  }> {
+    const errors: string[] = [];
     const alternates = SOURCES.filter((s) => s.id !== failedProviderId);
     for (const alt of alternates) {
-      if (this.cancelFlags.get(novelId)) return null;
+      if (this.cancelFlags.get(novelId)) return { result: null, errors };
+
+      const domain = extractDomain(alt.site);
+      // Skip any domain currently in cooldown (paused after a block).
+      const state = domainStates.get(domain);
+      if (state && state.pausedUntil > Date.now()) {
+        errors.push(`${alt.name}: in cooldown`);
+        continue;
+      }
+
       try {
-        const results = await withTimeout(
-          alt.search(novel.title),
-          15000,
-          `${alt.name} search`
-        );
-        const match = pickBestNovelMatch(results, novel.title);
-        if (!match) continue;
+        // Resolve the sibling novel page: use the SQLite cache if present,
+        // otherwise search by title once and cache the best match.
+        let siblingPath: string | null = null;
+        const cached = await getSiblingSourceEntry(novelId, alt.id);
+        if (cached?.siblingPath) {
+          siblingPath = cached.siblingPath;
+        } else {
+          const results = await withTimeout(
+            alt.search(novel.title),
+            15000,
+            `${alt.name} search`
+          );
+          const match = pickBestNovelMatch(results, novel.title);
+          if (match) {
+            siblingPath = match.path;
+            await setSiblingSourceEntry(novelId, alt.id, match.path, match.title);
+          }
+        }
+        if (!siblingPath) {
+          errors.push(`${alt.name}: novel not found`);
+          continue;
+        }
 
         const detail = await withTimeout(
-          alt.getNovel(match.path),
+          alt.getNovel(siblingPath),
           20000,
           `${alt.name} novel`
         );
         const target = findEquivalentChapter(detail.chapters, chapter);
-        if (!target) continue;
+        if (!target) {
+          errors.push(`${alt.name}: chapter not matched`);
+          continue;
+        }
 
-        const domain = extractDomain(alt.site);
         const content = await scheduleDomain(domain, () => alt.getChapter(target.path));
         if (content && content.trim().length > 0) {
-          return { content, provider: alt.id, path: target.path };
+          return {
+            result: { content, provider: alt.id, path: target.path },
+            errors,
+          };
         }
-      } catch (err) {
+        errors.push(`${alt.name}: empty chapter`);
+      } catch (err: any) {
         console.warn(`Alternate source ${alt.id} failed for chapter ${chapter.id}:`, err);
+        errors.push(`${alt.name}: ${describeChapterError(err)}`);
       }
     }
-    return null;
+    return { result: null, errors };
   }
 
   /**
    * Full local fetch pipeline for one chapter:
    * primary source (block-aware retries) -> alternate source -> hidden WebView.
+   * If every path fails, throws an error carrying the combined text.
    */
   private async fetchChapterWithFallbacks(
     novel: Novel,
@@ -465,6 +527,10 @@ class DownloadManagerService {
     } catch (primaryErr) {
       if (this.cancelFlags.get(novelId)) throw primaryErr;
 
+      const combined: string[] = [
+        `${primarySource.name}: ${describeChapterError(primaryErr)}`,
+      ];
+
       // 2. Same chapter number on another configured source.
       const alternate = await this.tryAlternateSources(
         novel,
@@ -472,7 +538,8 @@ class DownloadManagerService {
         primarySource.id,
         novelId
       );
-      if (alternate) return alternate;
+      combined.push(...alternate.errors);
+      if (alternate.result) return alternate.result;
 
       // 3. Last step: render the original chapter URL in a hidden WebView.
       if (isBlockedError(primaryErr)) {
@@ -480,9 +547,10 @@ class DownloadManagerService {
         if (webviewContent) {
           return { content: webviewContent, provider: primarySource.id, path: chapterPath };
         }
+        combined.push(`${primarySource.name}: WebView fallback failed`);
       }
 
-      throw primaryErr;
+      throw new Error(combined.join(' | '));
     }
   }
 

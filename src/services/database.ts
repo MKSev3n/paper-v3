@@ -54,6 +54,7 @@ const WEB_KEYS = {
   NOVELS: '@paper_web_novels',
   CHAPTERS: '@paper_web_chapters',
   PROGRESS: '@paper_web_progress',
+  SOURCE_MAP: '@paper_web_source_map',
 };
 
 async function readWebMap<T>(key: string): Promise<Record<string, T>> {
@@ -211,6 +212,15 @@ async function initSchema(db: SQLite.SQLiteDatabase): Promise<void> {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS chapter_source_map (
+      novel_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      sibling_path TEXT NOT NULL,
+      sibling_title TEXT,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (novel_id, source_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_chapters_novel_id ON chapters (novel_id);
     CREATE INDEX IF NOT EXISTS idx_chapters_serial ON chapters (novel_id, serial);
   `);
@@ -344,6 +354,77 @@ export async function getNovelById(id: string): Promise<Novel | null> {
   if (!row) return null;
 
   return mapNovelRow(row);
+}
+
+// ==========================================
+// SIBLING SOURCE MAP
+// Maps a local novel to its equivalent page on another source, so the title
+// search + best-match lookup happens only once per (novel, source) pair.
+// ==========================================
+
+export interface SourceMapEntry {
+  novelId: string;
+  sourceId: string;
+  siblingPath: string;
+  siblingTitle: string | null;
+}
+
+export async function getSiblingSourceEntry(
+  novelId: string,
+  sourceId: string
+): Promise<SourceMapEntry | null> {
+  if (Platform.OS === 'web') {
+    const map = await readWebMap<SourceMapEntry>(WEB_KEYS.SOURCE_MAP);
+    return map[`${novelId}::${sourceId}`] || null;
+  }
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<{
+    novel_id: string;
+    source_id: string;
+    sibling_path: string;
+    sibling_title: string | null;
+  }>(
+    `SELECT novel_id, source_id, sibling_path, sibling_title
+     FROM chapter_source_map WHERE novel_id = ? AND source_id = ?`,
+    [novelId, sourceId]
+  );
+  if (!row) return null;
+  return {
+    novelId: row.novel_id,
+    sourceId: row.source_id,
+    siblingPath: row.sibling_path,
+    siblingTitle: row.sibling_title,
+  };
+}
+
+export async function setSiblingSourceEntry(
+  novelId: string,
+  sourceId: string,
+  siblingPath: string,
+  siblingTitle?: string | null
+): Promise<void> {
+  if (Platform.OS === 'web') {
+    const map = await readWebMap<SourceMapEntry>(WEB_KEYS.SOURCE_MAP);
+    map[`${novelId}::${sourceId}`] = {
+      novelId,
+      sourceId,
+      siblingPath,
+      siblingTitle: siblingTitle ?? null,
+    };
+    await writeWebMap(WEB_KEYS.SOURCE_MAP, map);
+    return;
+  }
+  const db = await getDatabase();
+  await runWrite(
+    db,
+    `INSERT INTO chapter_source_map (novel_id, source_id, sibling_path, sibling_title, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(novel_id, source_id) DO UPDATE SET
+       sibling_path = excluded.sibling_path,
+       sibling_title = excluded.sibling_title,
+       updated_at = excluded.updated_at`,
+    [novelId, sourceId, siblingPath, siblingTitle ?? null, Date.now()]
+  );
 }
 
 export async function getAllNovels(): Promise<Novel[]> {

@@ -32,6 +32,12 @@ export interface Source {
   getListing(kind: ListingKind, page?: number): Promise<SearchItem[]>;
   getNovel(path: string): Promise<NovelDetail>;
   getChapter(path: string): Promise<string>;
+  /**
+   * Optional richer chapter fetch that also returns the chapter title parsed
+   * from the chapter heading. Sources that can extract a clean title implement
+   * this; callers fall back to `getChapter` when it is absent.
+   */
+  getChapterDetail?(path: string): Promise<{ title: string; content: string }>;
 }
 
 export interface SourceDiagnosticStep {

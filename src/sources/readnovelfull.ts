@@ -60,6 +60,180 @@ function appendPageParam(baseUrl: string, page: number): string {
   return `${clean}${sep}page=${page}`;
 }
 
+// ==========================================
+// CHAPTER TEXT CLEANING (shared across the NovelFull family)
+// Applied at parse time. Only the first few lines are treated as a header, so
+// the story body is never altered beyond whitespace normalization.
+// ==========================================
+
+const CHAPTER_TITLE_SELECTORS = [
+  '#chapter-title',
+  '.chapter-title',
+  '.chr-title',
+  '.entry-title',
+  '.text-center h2',
+  'h1',
+  'h2',
+];
+
+/** Normalize a string for comparison: lowercase, strip punctuation/whitespace. */
+function normalizeForMatch(value: string): string {
+  return (value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/** Reduce a heading like "Chapter 1: prison break" to its descriptive part. */
+function stripChapterNumberPrefix(title: string): string {
+  const cleaned = (title || '')
+    .replace(/^\s*chapter\s+\d+\s*[:.\-–]?\s*/i, '')
+    .replace(/^\s*ch\.?\s*\d+\s*[:.\-–]?\s*/i, '')
+    .trim();
+  return cleaned || (title || '').trim();
+}
+
+/**
+ * Extract the real chapter title from the chapter heading element. Prefers an
+ * explicit title/heading node, then any element whose text starts with
+ * "Chapter N". Returns '' when nothing usable is found.
+ */
+function extractChapterTitle(doc: HTMLElement, contentEl: HTMLElement): string {
+  // 1. Explicit title selectors. A "Chapter N..." heading is accepted from the
+  //    content element or the whole document; a bare heading (no chapter number)
+  //    is only accepted when it lives inside the content element, so a site
+  //    name in a document-level <h1> is never mistaken for the chapter title.
+  for (const selector of CHAPTER_TITLE_SELECTORS) {
+    const inContent = contentEl.querySelector(selector);
+    const el = inContent || doc.querySelector(selector);
+    const text = decodeHtmlEntities(el?.text || '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    if (/^(chapter|ch\.?)\s*\d+/i.test(text)) {
+      return text;
+    }
+    if (inContent && /h[12]/i.test(inContent.tagName || '')) {
+      return text;
+    }
+  }
+
+  // 2. Any heading whose text begins with "Chapter N".
+  const headings = doc.querySelectorAll('h1, h2, h3, .chapter-title, #chapter-title');
+  for (const h of headings) {
+    const text = decodeHtmlEntities(h.text || '').replace(/\s+/g, ' ').trim();
+    if (/^(chapter|ch\.?)\s*\d+/i.test(text)) {
+      return text;
+    }
+  }
+
+  return '';
+}
+
+/** Heuristic junk/watermark line filters (applied to the header region only). */
+function isHeaderJunkLine(line: string, chapterTitle: string, siteName: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return true;
+
+  // Repeats the chapter title or a bare "Chapter N" heading.
+  const normLine = normalizeForMatch(trimmed);
+  const normTitle = normalizeForMatch(chapterTitle);
+  if (normTitle && normLine === normTitle) return true;
+  if (/^(chapter|ch\.?)\s*\d+\s*[:.\-–]?.*$/i.test(trimmed) && trimmed.length <= 120) {
+    // A heading line like "Chapter 12: ..." (not story prose).
+    if (/^(chapter|ch\.?)\s*\d+\s*[:.\-–]?\s*$/i.test(trimmed) || normLine === normTitle) {
+      return true;
+    }
+  }
+
+  // Author / translator / source bylines.
+  if (/^author\s*:/i.test(trimmed)) return true;
+  if (/^translator\s*:/i.test(trimmed)) return true;
+  if (/^editor\s*:/i.test(trimmed)) return true;
+
+  // Machine-translation tags.
+  if (/\b(machine translation|mtl|translated by|translation by)\b/i.test(trimmed) && trimmed.length <= 80) {
+    return true;
+  }
+
+  // Lone numeric lines (page counters).
+  if (/^\d{1,4}$/.test(trimmed)) return true;
+
+  // "Read more at <site>" / site-name watermark lines.
+  if (/^read more (at|on)\b/i.test(trimmed)) return true;
+  if (siteName && normalizeForMatch(trimmed) === normalizeForMatch(siteName)) return true;
+
+  return false;
+}
+
+/** Remove spaces before closing quotes and punctuation; collapse whitespace. */
+function normalizeLineSpacing(line: string): string {
+  return line
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s+([”’.,!?;:%)\]])/g, '$1')
+    .replace(/([([{])\s+/g, '$1')
+    .trim();
+}
+
+/**
+ * Clean extracted chapter body text:
+ * - drop header junk (title repeats, bylines, MT tags, page counters, watermarks)
+ *   from the first lines only,
+ * - normalize whitespace and spacing before punctuation.
+ */
+function cleanChapterBody(
+  rawText: string,
+  chapterTitle: string,
+  siteName: string
+): string {
+  const HEADER_LINES = 5;
+  const normalized = rawText.replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+
+  const output: string[] = [];
+  let headerBudget = HEADER_LINES;
+  let startedBody = false;
+
+  for (const raw of lines) {
+    const line = raw.replace(/[ \t]+/g, ' ').trim();
+
+    if (!startedBody) {
+      if (!line) {
+        // Preserve a single blank separator, but don't count it as header.
+        if (output.length > 0 && output[output.length - 1] !== '') output.push('');
+        continue;
+      }
+      if (headerBudget > 0) {
+        headerBudget--;
+        if (isHeaderJunkLine(line, chapterTitle, siteName)) {
+          continue;
+        }
+      }
+      startedBody = true;
+      output.push(normalizeLineSpacing(line));
+      continue;
+    }
+
+    if (!line) {
+      if (output.length > 0 && output[output.length - 1] !== '') output.push('');
+      continue;
+    }
+    output.push(normalizeLineSpacing(line));
+  }
+
+  // Trim leading/trailing blank lines and collapse runs of blank lines.
+  const collapsed: string[] = [];
+  for (const l of output) {
+    if (l === '' && (collapsed.length === 0 || collapsed[collapsed.length - 1] === '')) {
+      continue;
+    }
+    collapsed.push(l);
+  }
+  while (collapsed.length > 0 && collapsed[collapsed.length - 1] === '') {
+    collapsed.pop();
+  }
+
+  return collapsed.join('\n');
+}
+
 export class NovelFullFamilySource implements Source {
   readonly id: string;
   readonly name: string;
@@ -438,6 +612,11 @@ export class NovelFullFamilySource implements Source {
   }
 
   async getChapter(path: string): Promise<string> {
+    const { content } = await this.getChapterDetail(path);
+    return content;
+  }
+
+  async getChapterDetail(path: string): Promise<{ title: string; content: string }> {
     const url = toAbsoluteUrl(path, this.site);
     const html = await fetchHtml(url, { site: this.site });
     const doc = parseDocument(html);
@@ -447,20 +626,29 @@ export class NovelFullFamilySource implements Source {
       throw new Error(`Could not locate chapter content on ${this.name}.`);
     }
 
-    // Remove common navigation/watermark blocks before extracting text
+    // Extract the real chapter title from the heading before mutating the DOM.
+    const chapterTitle = extractChapterTitle(doc, contentEl);
+
+    // Remove common navigation/watermark/ad blocks before extracting text.
     const extraNoise = contentEl.querySelectorAll(
-      '.chapter-nav, .unlock-buttons, .box-ads, .hidden-xs, [align="center"] ins'
+      '.chapter-nav, .unlock-buttons, .box-ads, .hidden-xs, [align="center"] ins, script, ins, .ads, .adsbox, .ad'
     );
     for (const el of extraNoise) {
       el.remove();
     }
 
-    const text = extractCleanParagraphText(contentEl);
-    if (!text) {
+    const rawText = extractCleanParagraphText(contentEl);
+    if (!rawText) {
       throw new Error(`Extracted chapter text from ${this.name} was empty.`);
     }
 
-    return text;
+    const content = cleanChapterBody(rawText, chapterTitle, this.name);
+    if (!content) {
+      throw new Error(`Extracted chapter text from ${this.name} was empty.`);
+    }
+
+    const title = stripChapterNumberPrefix(chapterTitle) || chapterTitle;
+    return { title, content };
   }
 }
 

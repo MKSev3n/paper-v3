@@ -355,18 +355,26 @@ class DownloadManagerService {
     domain: string,
     novelId: string | undefined,
     profile: LocalSourceProfile
-  ): Promise<string> {
+  ): Promise<{ content: string; title?: string }> {
     let lastError: Error | null = null;
     for (let attempt = 0; attempt <= BLOCK_MAX_RETRIES; attempt++) {
       if (novelId && this.cancelFlags.get(novelId)) {
         throw new Error('Download cancelled');
       }
       try {
+        // Prefer the richer fetch that also returns the parsed chapter title.
+        if (source.getChapterDetail) {
+          const detail = await source.getChapterDetail(chapterPath);
+          if (!detail.content || detail.content.trim().length === 0) {
+            throw new Error('Chapter content was empty.');
+          }
+          return { content: detail.content, title: detail.title };
+        }
         const text = await source.getChapter(chapterPath);
         if (!text || text.trim().length === 0) {
           throw new Error('Chapter content was empty.');
         }
-        return text;
+        return { content: text };
       } catch (err: any) {
         lastError = err instanceof Error ? err : new Error(String(err || 'Chapter fetch failed'));
 
@@ -428,7 +436,7 @@ class DownloadManagerService {
     failedProviderId: string,
     novelId: string
   ): Promise<{
-    result: { content: string; provider: string; path: string } | null;
+    result: { content: string; provider: string; path: string; title?: string } | null;
     errors: string[];
   }> {
     const errors: string[] = [];
@@ -479,10 +487,20 @@ class DownloadManagerService {
           continue;
         }
 
-        const content = await scheduleDomain(domain, () => alt.getChapter(target.path));
+        const fetched = await scheduleDomain(domain, () =>
+          alt.getChapterDetail
+            ? alt.getChapterDetail(target.path)
+            : alt.getChapter(target.path).then((content) => ({ content, title: '' }))
+        );
+        const content = fetched.content;
         if (content && content.trim().length > 0) {
           return {
-            result: { content, provider: alt.id, path: target.path },
+            result: {
+              content,
+              provider: alt.id,
+              path: target.path,
+              ...(fetched.title ? { title: fetched.title } : {}),
+            },
             errors,
           };
         }
@@ -506,7 +524,7 @@ class DownloadManagerService {
     primarySource: Source,
     novelId: string,
     profile: LocalSourceProfile
-  ): Promise<{ content: string; provider: string; path: string }> {
+  ): Promise<{ content: string; provider: string; path: string; title?: string }> {
     const chapterPath = chapter.path || chapter.url;
     if (!chapterPath) {
       throw new Error('Chapter path is missing.');
@@ -514,7 +532,7 @@ class DownloadManagerService {
     const domain = extractDomain(primarySource.site);
 
     try {
-      const content = await scheduleDomain(domain, () =>
+      const fetched = await scheduleDomain(domain, () =>
         this.fetchLocalChapterWithBlockRetries(
           primarySource,
           chapterPath,
@@ -523,7 +541,12 @@ class DownloadManagerService {
           profile
         )
       );
-      return { content, provider: primarySource.id, path: chapterPath };
+      return {
+        content: fetched.content,
+        provider: primarySource.id,
+        path: chapterPath,
+        ...(fetched.title ? { title: fetched.title } : {}),
+      };
     } catch (primaryErr) {
       if (this.cancelFlags.get(novelId)) throw primaryErr;
 
@@ -605,6 +628,7 @@ class DownloadManagerService {
           );
           await saveChapter({
             ...chapter,
+            title: result.title || chapter.title,
             provider: result.provider,
             path: result.path,
             content: result.content,
@@ -955,6 +979,9 @@ class DownloadManagerService {
           );
           content = result.content;
           fetchedWordCount = countWords(content);
+          if (result.title) {
+            fetchedTitle = result.title;
+          }
           // Persist using the source that actually produced the content.
           effectiveProvider = result.provider;
           chapter = { ...chapter, path: result.path };

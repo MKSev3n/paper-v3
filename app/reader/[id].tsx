@@ -180,12 +180,19 @@ export default function ReaderScreen() {
             if (!chapterPath) {
               throw new Error('Chapter path is missing for this local source.');
             }
-            const content = await localSource.getChapter(chapterPath);
+            // Prefer the richer fetch that also returns the parsed chapter title.
+            const detail = localSource.getChapterDetail
+              ? await localSource.getChapterDetail(chapterPath)
+              : {
+                  content: await localSource.getChapter(chapterPath),
+                  title: '',
+                };
+            const content = detail.content;
             const fullChapter: Chapter = {
               id: targetChapterId,
               novelId: novelId || ch?.novelId || '',
               serial: ch?.serial || 1,
-              title: ch?.title || `Chapter ${ch?.serial || 1}`,
+              title: detail.title || ch?.title || `Chapter ${ch?.serial || 1}`,
               provider: localSource.id,
               path: chapterPath,
               content,

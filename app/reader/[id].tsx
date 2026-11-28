@@ -875,29 +875,35 @@ export default function ReaderScreen() {
             </View>
 
             {/* Font Size Adjuster */}
-            <Text style={styles.settingGroupLabel}>FONT SIZE ({settings.fontSize}px)</Text>
+            <Text style={[styles.settingGroupLabel, { color: appColors.textMuted }]}>FONT SIZE ({settings.fontSize}pt)</Text>
             <View style={styles.sizeControlRow}>
               <Pressable
-                style={styles.sizeStepButton}
+                style={[
+                  styles.sizeStepButton,
+                  { backgroundColor: appColors.surfaceRaised, borderColor: appColors.border },
+                ]}
                 onPress={() => updateSetting('fontSize', Math.max(14, settings.fontSize - 1))}
               >
-                <Text style={styles.sizeStepButtonText}>A-</Text>
+                <Text style={[styles.sizeStepButtonText, { color: appColors.text }]}>A-</Text>
               </Pressable>
 
               <View style={styles.sizeDisplay}>
-                <Text style={styles.sizeDisplayText}>{settings.fontSize} pt</Text>
+                <Text style={[styles.sizeDisplayText, { color: appColors.text }]}>{settings.fontSize} pt</Text>
               </View>
 
               <Pressable
-                style={styles.sizeStepButton}
+                style={[
+                  styles.sizeStepButton,
+                  { backgroundColor: appColors.surfaceRaised, borderColor: appColors.border },
+                ]}
                 onPress={() => updateSetting('fontSize', Math.min(28, settings.fontSize + 1))}
               >
-                <Text style={styles.sizeStepButtonText}>A+</Text>
+                <Text style={[styles.sizeStepButtonText, { color: appColors.text }]}>A+</Text>
               </Pressable>
             </View>
 
             {/* Line Spacing Adjuster */}
-            <Text style={styles.settingGroupLabel}>LINE SPACING</Text>
+            <Text style={[styles.settingGroupLabel, { color: appColors.textMuted }]}>LINE SPACING</Text>
             <View style={styles.spacingRow}>
               {[
                 { label: 'Compact', val: 1.5 },
@@ -910,14 +916,17 @@ export default function ReaderScreen() {
                     key={sp.label}
                     style={[
                       styles.spacingOption,
-                      isSelected && styles.spacingOptionSelected,
+                      {
+                        backgroundColor: isSelected ? appColors.primaryMuted : appColors.surfaceRaised,
+                        borderColor: isSelected ? appColors.primary : appColors.border,
+                      },
                     ]}
                     onPress={() => updateSetting('lineSpacing', sp.val)}
                   >
                     <Text
                       style={[
                         styles.spacingOptionText,
-                        isSelected && styles.spacingOptionTextSelected,
+                        { color: isSelected ? appColors.primary : appColors.textSecondary },
                       ]}
                     >
                       {sp.label}
@@ -928,7 +937,7 @@ export default function ReaderScreen() {
             </View>
 
             {/* Chapter Navigation Mode */}
-            <Text style={styles.settingGroupLabel}>CHAPTER NAVIGATION</Text>
+            <Text style={[styles.settingGroupLabel, { color: appColors.textMuted }]}>CHAPTER NAVIGATION</Text>
             <View style={styles.spacingRow}>
               {(['scroll', 'swipe'] as const).map((mode) => {
                 const isSelected = (settings.chapterNavigation || 'scroll') === mode;
@@ -938,14 +947,17 @@ export default function ReaderScreen() {
                     key={mode}
                     style={[
                       styles.spacingOption,
-                      isSelected && styles.spacingOptionSelected,
+                      {
+                        backgroundColor: isSelected ? appColors.primaryMuted : appColors.surfaceRaised,
+                        borderColor: isSelected ? appColors.primary : appColors.border,
+                      },
                     ]}
                     onPress={() => updateSetting('chapterNavigation', mode)}
                   >
                     <Text
                       style={[
                         styles.spacingOptionText,
-                        isSelected && styles.spacingOptionTextSelected,
+                        { color: isSelected ? appColors.primary : appColors.textSecondary },
                       ]}
                     >
                       {label}
@@ -956,7 +968,7 @@ export default function ReaderScreen() {
             </View>
 
             {/* Font Family Adjuster */}
-            <Text style={styles.settingGroupLabel}>TYPEFACE</Text>
+            <Text style={[styles.settingGroupLabel, { color: appColors.textMuted }]}>TYPEFACE</Text>
             <View style={styles.fontFamilyRow}>
               {[
                 { label: 'Serif', val: 'serif' as const },
@@ -969,14 +981,17 @@ export default function ReaderScreen() {
                     key={f.label}
                     style={[
                       styles.fontFamilyOption,
-                      isSelected && styles.fontFamilyOptionSelected,
+                      {
+                        backgroundColor: isSelected ? appColors.primaryMuted : appColors.surfaceRaised,
+                        borderColor: isSelected ? appColors.primary : appColors.border,
+                      },
                     ]}
                     onPress={() => updateSetting('fontFamily', f.val)}
                   >
                     <Text
                       style={[
                         styles.fontFamilyOptionText,
-                        isSelected && styles.fontFamilyOptionTextSelected,
+                        { color: isSelected ? appColors.primary : appColors.textSecondary },
                       ]}
                     >
                       {f.label}

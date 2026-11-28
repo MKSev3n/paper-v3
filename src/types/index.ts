@@ -67,6 +67,7 @@ export interface ReaderSettings {
   fontSize: number; // 14 to 28
   lineSpacing: number; // 1.4, 1.8, 2.2
   fontFamily: 'default' | 'serif' | 'monospace';
+  chapterNavigation?: 'scroll' | 'swipe';
 }
 
 export type DownloadStatus = 'idle' | 'pending' | 'downloading' | 'completed' | 'failed' | 'paused';

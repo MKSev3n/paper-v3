@@ -29,6 +29,7 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   fontSize: 18,
   lineSpacing: 1.8,
   fontFamily: 'serif',
+  chapterNavigation: 'scroll',
 };
 
 export const DEFAULT_DISCOVER_PROVIDERS: SearchProviderId[] = [
